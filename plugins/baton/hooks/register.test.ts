@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 
 import { parsePeers } from './shared'
 
@@ -127,7 +128,8 @@ test('the band counts sent tasks, tracks their results and expands on press', as
   const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
   expect((await ui.find({ key: 'sent' }))?.text).toContain('→ 0/1')
   await ui.press({ key: 'sent' })
-  expect(await ui.find({ text: /done.*pull-requests\/7/ })).toBeDefined()
+  expect(await ui.find({ text: /✓ #\w+ → data-dashboards-ca\s+done/ })).toBeDefined()
+  expect((await ui.find({ type: 'Link' }))?.props).toMatchObject({ href: 'https://bitbucket.org/x/pull-requests/7', label: 'PR #7' })
 })
 
 test('fullscreen: a press opens the docked pane on that tab instead of expanding the band', async ($, on) => {
@@ -205,8 +207,76 @@ test('/ask sends a question and shows the answer when it comes back', async ($, 
   const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
   expect((await ui.find({ key: 'sent' }))?.text).toContain('→ 0/1')
   await ui.press({ key: 'sent' })
-  expect(await ui.find({ text: /\? #\w+ → api-server-7f\s+answered/ })).toBeDefined()
+  expect(await ui.find({ text: /✓ #\w+ → api-server-7f\s+answered/ })).toBeDefined()
   expect(await ui.find({ text: /↳ In src\/auth\/config\.ts:12/ })).toBeDefined()
   // A URL inside an answer is not taken as a PR link on the question row.
   expect(await ui.find({ text: /configured\?\s+https/ })).toBeUndefined()
+})
+
+const result = (id: string, status: string, rest = '') => `BATON-RESULT ${id}: ${status}. [api] "task"${rest}`
+
+async function passOne($: Engine, agent = 'api-server-7f') {
+  const out = await $.command.run({ command: 'pass', args: `${agent} add rate limiting` } as never)
+  return /#(\w+)/.exec(out.text ?? '')?.[1] ?? ''
+}
+
+test('a final result for a task passed from here raises a toast; others do not', async ($, on) => {
+  const w = world(on)
+  const id = await passOne($)
+  await $.session.receive({ origin: { kind: 'peer' }, text: result(id, 'started') })
+  await $.session.receive({ origin: { kind: 'peer' }, text: result('zz9', 'done') })
+  expect(w.toasts).toEqual([])
+  await $.session.receive({ origin: { kind: 'peer' }, text: result(id, 'done', '\nPR: https://github.com/o/r/pull/42') })
+  expect(w.toasts).toEqual([`✓ api-server-7f done #${id} · https://github.com/o/r/pull/42`])
+  await $.session.receive({ origin: { kind: 'peer' }, text: result(id, 'blocked') })
+  expect(w.toasts[1]).toBe(`✗ api-server-7f blocked #${id}`)
+})
+
+test('sent rows carry a status icon and an age', async ($, on) => {
+  const w = world(on)
+  const id = await passOne($)
+  await w.clock.advance(12 * 60_000)
+  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  await ui.press({ key: 'sent' })
+  expect(await ui.find({ text: new RegExp(`○ #${id} → api-server-7f\\s+sent 12m`) })).toBeDefined()
+  await $.session.receive({ origin: { kind: 'peer' }, text: result(id, 'done') })
+  await w.clock.advance(60 * 60_000)
+  // The panel is still open from the first press: `open` is shared state.
+  const later = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  expect(await later.find({ text: new RegExp(`✓ #${id} → api-server-7f\\s+done 1h`) })).toBeDefined()
+})
+
+test('a passed task with no word for 2h is marked quiet', async ($, on) => {
+  const w = world(on)
+  await passOne($)
+  await w.clock.advance(119 * 60_000)
+  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  expect((await ui.find({ key: 'sent' }))?.text).toBe('→ 1/1')
+  await w.clock.advance(2 * 60_000)
+  await $.session.receive({ origin: { kind: 'peer' }, text: 'hello' })
+  const later = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  expect((await later.find({ key: 'sent' }))?.text).toBe('→ 1/1 (1 quiet)')
+  await later.press({ key: 'sent' })
+  expect(await later.find({ text: /no word in 2h/ })).toBeDefined()
+})
+
+test('backlog rows in the pane move up, down and drop', async ($, on) => {
+  const w = world(on, { value: true })
+  for (const id of ['a1', 'b2', 'c3']) await $.session.receive({ origin: { kind: 'peer' }, text: passed(id, `task ${id}`) })
+  const order = async () => ((await $.command.run({ command: 'baton', args: '' } as never)).text ?? '').match(/#\w+/g)
+  expect(await order()).toEqual(['#a1', '#b2', '#c3'])
+  const pane = await $.ui.mount({
+    plugin: 'baton',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'baton',
+    props: { title: 'Baton', isFocused: false, bodyColumns: 60, placement: 'dock' },
+  } as never)
+  await pane.press({ key: 'down-a1' })
+  expect(await order()).toEqual(['#b2', '#a1', '#c3'])
+  await pane.press({ key: 'up-c3' })
+  expect(await order()).toEqual(['#b2', '#c3', '#a1'])
+  await pane.press({ key: 'drop-c3' })
+  expect(await order()).toEqual(['#b2', '#a1'])
+  expect(w.sent.some(t => t.startsWith('BATON-RESULT c3: dropped'))).toBe(true)
 })

@@ -3,7 +3,18 @@ export type Queue = { active: Task | null; backlog: Task[] }
 export type Peer = { name: string; ref: string; mode: string; state: string }
 export type Peers = { me: string; list: Peer[] }
 /** A task this session handed to another; `status` is the last BATON-RESULT heard. */
-export type Sent = { id: string; agent: string; task: string; status: string; prUrl?: string; kind?: 'ask'; answer?: string }
+export type Sent = {
+  id: string
+  agent: string
+  task: string
+  status: string
+  prUrl?: string
+  kind?: 'ask'
+  answer?: string
+  /** Epoch ms; absent on entries stored before 1.3.0. */
+  sentAt?: number
+  updatedAt?: number
+}
 export type Panel = 'me' | 'sessions' | 'tasks' | 'sent'
 
 declare module 'claude-code' {

@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Panel, Queue, Sent, Task } from '../types'
-import { badges, FINAL, parsePeers, rowsFor, TITLES } from './shared'
+import { badges, FINAL, ICONS, parsePeers, rowsFor, TITLES } from './shared'
 import type { Row, View } from './shared'
 
 const peersAtom = atom({ plugin: 'baton', key: 'peers' } as const, { me: '', list: [] })
@@ -146,7 +146,8 @@ async function pass($: $, agent: string, task: string, branchRule: string): Prom
     text: `${MARK}${JSON.stringify(t)}\n\n${taskPrompt(t, branchRule)}`,
   })
   if (!sent.isDelivered) return `Not delivered to ${agent}: ${sent.reason}`
-  await changeSent($, list => [...list, { id: t.id, agent, task, status: 'sent' }])
+  const now = await $.clock.now()
+  await changeSent($, list => [...list, { id: t.id, agent, task, status: 'sent', sentAt: now, updatedAt: now }])
   return `Passed #${t.id} to ${agent}. It reports back here when it is queued, started and done.`
 }
 
@@ -154,15 +155,44 @@ async function ask($: $, agent: string, question: string): Promise<string> {
   const t = await newTask($, question)
   const sent = await $.session.send({ to: agent, text: `${ASK_MARK}${JSON.stringify(t)}\n\n${askPrompt(t)}` })
   if (!sent.isDelivered) return `Not delivered to ${agent}: ${sent.reason}`
-  await changeSent($, list => [...list, { id: t.id, agent, task: question, status: 'sent', kind: 'ask' }])
+  const now = await $.clock.now()
+  await changeSent($, list => [...list, { id: t.id, agent, task: question, status: 'sent', kind: 'ask', sentAt: now, updatedAt: now }])
   return `Asked ${agent} (#${t.id}). The answer comes back here.`
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
 
 const snapshot = async ($: $): Promise<View> => {
-  const [peers, queue, sent, open] = await Promise.all([read($, peersAtom), read($, queueAtom), read($, sentAtom), read($, openAtom)])
-  return { peers, queue, sent, open }
+  const [peers, queue, sent, open, now] = await Promise.all([
+    read($, peersAtom),
+    read($, queueAtom),
+    read($, sentAtom),
+    read($, openAtom),
+    $.clock.now(),
+  ])
+  return { peers, queue, sent, open, now }
+}
+
+async function moveTask($: $, id: string, by: number) {
+  await serial(async () => {
+    const q = await load($)
+    const i = q.backlog.findIndex(t => t.id === id)
+    const j = i + by
+    const a = q.backlog[i]
+    const b = q.backlog[j]
+    if (i < 0 || !a || !b) return
+    await save($, { ...q, backlog: q.backlog.map((t, k) => (k === i ? b : k === j ? a : t)) })
+  })
+}
+
+async function dropTask($: $, id: string) {
+  const dropped = await serial(async () => {
+    const q = await load($)
+    const hit = q.backlog.find(t => t.id === id)
+    if (hit) await save($, { ...q, backlog: q.backlog.filter(t => t.id !== id) })
+    return hit
+  })
+  if (dropped) await notify($, dropped, 'dropped', 'was removed from the backlog by the person here.')
 }
 
 const clearFinished = ($: $) => changeSent($, list => list.filter(s => !FINAL.has(s.status)))
@@ -242,9 +272,14 @@ export const register: Register = (on, options) => {
       // An answer is the text after its first line; any URL in it is not a PR.
       const answer = status === 'answered' ? clip(e.text.split('\n').slice(1).join(' ').trim(), 2000) : ''
       const prUrl = status === 'answered' ? undefined : URL.exec(e.text)?.[0]
+      const now = await $.clock.now()
+      const ours = (await loadSent($)).find(s => s.id === id)
       await changeSent($, list =>
-        list.map(s => (s.id === id ? { ...s, status, ...(prUrl ? { prUrl } : {}), ...(answer ? { answer } : {}) } : s)),
+        list.map(s =>
+          s.id === id ? { ...s, status, updatedAt: now, ...(prUrl ? { prUrl } : {}), ...(answer ? { answer } : {}) } : s,
+        ),
       )
+      if (ours && FINAL.has(status)) $.ui.toast(`${ICONS[status] ?? '·'} ${ours.agent} ${status} #${id}${prUrl ? ` · ${prUrl}` : ''}`)
       return next(e)
     }
     const task = parse(e.text)
@@ -347,7 +382,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const v = await snapshot($)
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button, Link, Text } = $.ui.resolve(e)
     // Fullscreen docks a pane beside the transcript: details go there, not under the band.
     const docks = e.viewport?.isFullscreen === true
     const width = Math.max(20, e.props.bodyColumns - 4)
@@ -362,7 +397,8 @@ export const register: Register = (on, options) => {
         <Button key={r.key} plain dimColor label={r.text} onPress={() => clearFinished($)} />
       ) : (
         <Text key={r.key} color={r.color} wrap="truncate-end">
-          {clip(r.text, width)}
+          {r.link ? `${clip(r.text, width - r.link.label.length - 2)}  ` : clip(r.text, width)}
+          {r.link ? <Link href={r.link.href} label={r.link.label} /> : null}
         </Text>
       )
 
@@ -384,7 +420,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const v = await snapshot($)
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button, Link, Text } = $.ui.resolve(e)
     const panel = v.open ?? 'tasks'
     const pick = (p: Panel) => async () => {
       if (p === 'sessions') void refreshPeers($)
@@ -400,15 +436,25 @@ export const register: Register = (on, options) => {
         </Box>
         <Text bold>{TITLES[panel]}</Text>
         <Box flexDirection="column">
-          {rowsFor(panel, v).map(r =>
-            r.isClear ? (
-              <Button key={r.key} plain dimColor label={r.text} onPress={() => clearFinished($)} />
-            ) : (
+          {rowsFor(panel, v).map(r => {
+            if (r.isClear) return <Button key={r.key} plain dimColor label={r.text} onPress={() => clearFinished($)} />
+            const text = (
               <Text key={r.key} color={r.color} wrap="wrap">
-                {r.text}
+                {r.link ? `${r.text}  ` : r.text}
+                {r.link ? <Link href={r.link.href} label={r.link.label} /> : null}
               </Text>
-            ),
-          )}
+            )
+            const id = r.taskId
+            if (!id) return text
+            return (
+              <Box key={r.key} columnGap={1}>
+                {text}
+                <Button key={`up-${id}`} plain dimColor label="↑" onPress={() => moveTask($, id, -1)} />
+                <Button key={`down-${id}`} plain dimColor label="↓" onPress={() => moveTask($, id, 1)} />
+                <Button key={`drop-${id}`} plain dimColor label="✕" onPress={() => dropTask($, id)} />
+              </Box>
+            )
+          })}
         </Box>
       </Box>
     )
