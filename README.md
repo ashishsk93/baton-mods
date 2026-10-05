@@ -8,6 +8,7 @@ One session per repo. When work belongs somewhere else, hand it off and keep goi
 
 [![Version](https://img.shields.io/badge/version-1.6.0-blue)](plugins/baton/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757)](https://claude.com/claude-code)
+[![plugin checks](https://github.com/ashishsk93/baton-mods/actions/workflows/plugin-checks.yml/badge.svg)](https://github.com/ashishsk93/baton-mods/actions/workflows/plugin-checks.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 </div>
@@ -158,6 +159,10 @@ baton is a mod: it runs inside Claude Code with your permissions. It:
 - sends messages between your own local sessions.
 
 Run `claude plugin validate plugins/baton` to see the full list before you install it.
+
+## 📝 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## 📄 License
 
