@@ -6,7 +6,7 @@
 
 One session per repo. When work belongs somewhere else, hand it off and keep going.
 
-[![Version](https://img.shields.io/badge/version-1.4.0-blue)](plugins/baton/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.5.0-blue)](plugins/baton/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757)](https://claude.com/claude-code)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -37,6 +37,16 @@ Or just ask Claude: *"pass this to web-app: the signup form should trim whitespa
 | 🛠️ **Takes it to a PR** | Branches by your rule, makes the change, runs the repo's checks, commits, pushes, opens a pull request. |
 | 📣 **Reports back** | Your session gets the outcome and the PR link. |
 | ⏭️ **Picks up the next** | On its own, or when you run `/baton-next`. |
+
+Got a change that spans repos? Pass it to several sessions at once, comma-separated:
+
+```
+/pass api-server,web-app,infra bump lodash to 4.17.21
+```
+
+Each session gets its own task. In the `→` panel they show as one group, `◇ 2/3 done  bump lodash`, with the members underneath.
+
+If the receiving session hits something only you can answer, it asks instead of guessing. You get a toast and a `? waiting` row with the question. Reply with `/baton-answer <id> <answer>` and it carries on.
 
 ## ❓ Just ask
 
@@ -93,13 +103,13 @@ Each task you passed on shows its state, how long since you last heard, and a cl
 
 | Icon | State |
 | --- | --- |
-| `○` / `?` | Sent (a task / a question), no reply yet |
+| `○` / `?` | Sent (a task / a question), no reply yet; `?` also means waiting on your answer |
 | `≡` | Queued behind other work |
 | `▶` | Being worked on |
 | `✓` | Done, already in place, or answered |
-| `✗` | Blocked or dropped |
+| `✗` | Blocked, dropped or cancelled |
 
-A toast tells you as soon as a task finishes or gets stuck, so you don't have to watch the band. In the side panel, each queued task here has `↑` `↓` `✕` buttons to reorder the backlog or drop a task. Dropping one tells the sender.
+A toast tells you as soon as a task finishes, gets stuck or has a question, so you don't have to watch the band. For GitHub PRs, baton follows the PR after "done" and adds `● CI running`, `✗ CI failing`, `✓ CI passing` or `✓ merged` to the row, checking every 5 minutes until it merges or closes. In the side panel, each queued task here has `↑` `↓` `✕` buttons to reorder the backlog or drop a task. Dropping one tells the sender.
 
 ## 🚀 Install
 
@@ -114,10 +124,13 @@ Needs Claude Code **v2.1.287** or later. Install it on every machine whose sessi
 
 | Command | What it does |
 | --- | --- |
-| `/pass <session> <task>` | Pass a task to a session by its name in ListAgents. You can also just ask Claude to "pass this to …". |
+| `/pass <session>[,<session>…] <task>` | Pass a task to a session by its name in ListAgents, or to several at once. You can also just ask Claude to "pass this to …". |
 | `/ask <session> <question>` | Ask a session a question about its repo. It answers read-only and changes nothing. |
 | `/baton` | Show the task this session is working on and its backlog |
 | `/baton-next [force]` | Pick up the next queued task; `force` drops a stuck one first |
+| `/baton-cancel <id>` | Take back a task you passed. The receiver drops it if it's still queued, and says so if it's already running. |
+| `/baton-answer <id> <answer>` | Answer a question a receiving session asked about a task you passed |
+| `/baton-report <id> <done\|already-done\|blocked> [PR URL] [summary]` | On the receiving side: send the real outcome of a task that already left the queue, e.g. one that was blocked and you then finished by hand |
 
 ## ⚙️ Configure
 
@@ -139,6 +152,7 @@ The default branch rule:
 baton is a mod: it runs inside Claude Code with your permissions. It:
 
 - runs `git status` in the session's repo,
+- runs `gh pr view` for GitHub PRs it follows (skipped quietly when `gh` isn't installed),
 - submits prompts in the receiving session,
 - sends messages between your own local sessions.
 

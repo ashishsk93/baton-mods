@@ -1,47 +1,8 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import type { Engine } from 'claude-code/testing'
 
 import { matchTarget, parsePeers } from './shared'
-
-const passed = (id: string, task: string) =>
-  `BATON-PASS ${JSON.stringify({ id, task, from: 'sender-session', fromLabel: 'launchpad' })}\n\nTask from launchpad: ${task}`
-
-function world(on: On, dirty = { value: false }) {
-  const sent: string[] = []
-  const targets: unknown[] = []
-  const submitted: string[] = []
-  mock.store(on)
-  const clock = mock.clock(on)
-  on('session.root', () => ({ value: '/repos/data_dashboards_db' }))
-  on('session.id', () => ({ value: 'receiver-session' }))
-  on('ui.status', () => ({ value: undefined }))
-  const toasts: string[] = []
-  on('ui.toast', (_$, e) => {
-    toasts.push(e.text)
-    return { value: undefined }
-  })
-  on('process.run', () => ({
-    value: {
-      exitCode: 0,
-      stdout: dirty.value ? ' M Makefile\n' : '',
-      stderr: '',
-      isStdoutTruncated: false,
-      isStderrTruncated: false,
-    },
-  }))
-  on('session.send', (_$, e) => {
-    sent.push(e.text)
-    targets.push(e.to)
-    return { isDelivered: true }
-  })
-  on('session.receive', (_$, e) => ({ text: e.text }))
-  on('prompt.submit', (_$, e) => {
-    submitted.push(e.text)
-    return { text: e.text }
-  })
-  return { sent, targets, submitted, toasts, clock }
-}
+import { asked, BAND, listAgents, passed, passOne, PEERS, result, world } from './testkit'
 
 test('starts a task, backlogs the next, reports done and picks up the backlog', async ($, on) => {
   const w = world(on)
@@ -106,11 +67,6 @@ test('parses this session and its peers from ListAgents, hiding claude-mem obser
   expect(peers.list.map(p => `${p.name}:${p.state}`)).toEqual(['data-dashboards-ca:idle', 'api-server-7f:busy'])
 })
 
-const BAND = {
-  component: 'AbovePrompt',
-  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100 },
-} as const
-
 test('the band counts sent tasks, tracks their results and expands on press', async ($, on) => {
   world(on)
   const handed = await $.command.run({ command: 'pass', args: 'data-dashboards-ca raise cpu to 2048' } as never)
@@ -173,9 +129,6 @@ test('the branch_rule option goes into the task prompt', { options: { branch_rul
   expect(w.submitted[0]).toContain('Use release/<slug>')
 })
 
-const asked = (id: string, question: string) =>
-  `BATON-ASK ${JSON.stringify({ id, task: question, from: 'sender-session', fromLabel: 'web-app' })}\n\nQuestion from web-app: ${question}`
-
 test('a question is answered read-only, even while busy, and the answer goes back', async ($, on) => {
   const w = world(on, { value: true })
   await $.session.receive({ origin: { kind: 'peer' }, text: passed('t1', 'busy work') })
@@ -214,13 +167,6 @@ test('/ask sends a question and shows the answer when it comes back', async ($, 
   // A URL inside an answer is not taken as a PR link on the question row.
   expect(await ui.find({ text: /configured\?\s+https/ })).toBeUndefined()
 })
-
-const result = (id: string, status: string, rest = '') => `BATON-RESULT ${id}: ${status}. [api] "task"${rest}`
-
-async function passOne($: Engine, agent = 'api-server-7f') {
-  const out = await $.command.run({ command: 'pass', args: `${agent} add rate limiting` } as never)
-  return /#(\w+)/.exec(out.text ?? '')?.[1] ?? ''
-}
 
 test('a final result for a task passed from here raises a toast; others do not', async ($, on) => {
   const w = world(on)
@@ -282,16 +228,6 @@ test('backlog rows in the pane move up, down and drop', async ($, on) => {
   expect(await order()).toEqual(['#b2', '#a1'])
   expect(w.sent.some(t => t.startsWith('BATON-RESULT c3: dropped'))).toBe(true)
 })
-
-const PEERS = `This session is web-app-3f [aa11bb] — the name other sessions use to message it.
-
-Peer sessions (4):
-  api-server-7f [1a2b3c]  ·  interactive  ·  busy  ·  started 9m ago
-  api-gateway-2c [4d5e6f]  ·  interactive  ·  idle  ·  started 2m ago
-  infra-a9 [7a8b9c]  ·  interactive  ·  idle  ·  started 1h ago
-  observer-sessions-35 [07c6f3]  ·  interactive  ·  busy  ·  started 4m ago`
-
-const listAgents = (on: On, listing = PEERS) => on('tool.call', { tool: 'ListAgents' } as never, () => ({ result: { listing } }) as never)
 
 test('a custom hidden_sessions pattern replaces the default', () => {
   expect(parsePeers(PEERS, /^api-/).list.map(p => p.name)).toEqual(['infra-a9', 'observer-sessions-35'])

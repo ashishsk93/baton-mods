@@ -2,8 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Panel, Queue, Sent, Task } from '../types'
-import { badges, DEFAULT_HIDDEN, FINAL, ICONS, matchTarget, parsePeers, rowsFor, TITLES } from './shared'
+import { badges, DEFAULT_HIDDEN, FINAL, GITHUB_PR, ICONS, isFollowed, matchTarget, parsePeers, prState, rowsFor, TITLES } from './shared'
 import type { Row, Target, View } from './shared'
+import { askPrompt, continuePrompt, taskPrompt, waitingDetail } from './prompts'
 
 const peersAtom = atom({ plugin: 'baton', key: 'peers' } as const, { me: '', list: [] })
 const queueAtom = atom({ plugin: 'baton', key: 'queue' } as const, { active: null, backlog: [] })
@@ -11,6 +12,8 @@ const sentAtom = atom({ plugin: 'baton', key: 'sent' } as const, [])
 const openAtom = atom({ plugin: 'baton', key: 'open' } as const, null)
 
 type $ = EngineInterface
+/** PR follow-up for this load: whether its timer runs, and whether `gh` turned out to be missing. */
+type Poll = { isOn: boolean; isGhMissing: boolean }
 /** The person's options, read once per load. `warning` is a bad hidden_sessions pattern, toasted once. */
 type Config = { branchRule: string; hidden: RegExp; warning?: { text: string; isShown: boolean } }
 
@@ -19,10 +22,16 @@ const MARK_LINE = /BATON-PASS (\{.*\})/
 // A question: answered read-only, outside the task queue.
 const ASK_MARK = 'BATON-ASK '
 const ASK_LINE = /BATON-ASK (\{.*\})/
+// The sender takes back a queued task; only the session that passed it may.
+const CANCEL_MARK = 'BATON-CANCEL '
+const CANCEL_LINE = /BATON-CANCEL (\{.*\})/
+// The sender's answer to a receiver's ask_sender question.
+const ANSWER_LINE = /BATON-ANSWER (\w+): ([\s\S]+)/
 // Every report, from this mod or from a receiver's model without it, leads with this line.
 const RESULT_LINE = /BATON-RESULT (\w+): ([\w-]+)/
 const URL = /https?:\/\/\S+/
 const PEERS_EVERY_MS = 20_000
+const PR_EVERY_MS = 5 * 60_000
 const PANE = 'baton'
 const PANE_COLUMNS = 64
 const STATUSES = ['done', 'already-done', 'blocked'] as const
@@ -54,6 +63,10 @@ const loadSent = async ($: $): Promise<Sent[]> => ((await $.store.get(await stor
 // Questions this session still owes an answer to, so `answer` knows who asked.
 const loadAsked = async ($: $): Promise<Task[]> => ((await $.store.get(await storeKey($, 'asked'))) as Task[] | undefined) ?? []
 const saveAsked = async ($: $, list: Task[]) => $.store.set(await storeKey($, 'asked'), list.slice(-20))
+// Tasks this session finished or dropped, so /baton-report can still reach their senders.
+const loadFinished = async ($: $): Promise<Task[]> => ((await $.store.get(await storeKey($, 'finished'))) as Task[] | undefined) ?? []
+const addFinished = async ($: $, t: Task) =>
+  $.store.set(await storeKey($, 'finished'), [...(await loadFinished($)).filter(x => x.id !== t.id), t].slice(-20))
 const changeSent = ($: $, fn: (list: Sent[]) => Sent[]) =>
   serial(async () => {
     const list = fn(await loadSent($)).slice(-50)
@@ -72,32 +85,6 @@ export function parse(text: string, line = MARK_LINE): Task | undefined {
     return undefined
   }
 }
-
-const taskPrompt = (t: Task, branchRule: string) =>
-  [
-    `Task #${t.id}, passed from ${t.fromLabel}:`,
-    '',
-    t.task,
-    '',
-    'Take it through to a pull request that is ready for review:',
-    '1. Check first whether this change is already in place. If it is, change nothing and call the task_done tool with status "already-done" and what you found.',
-    `2. ${branchRule} If this repo's own instructions name a branch rule, use that one.`,
-    '3. Make the change, run the checks this repo has, and commit.',
-    "4. Push the branch and open a pull request with the tooling this repo's remote supports. If you cannot open one, push and give the URL to create it.",
-    '5. Call the task_done tool with status "done", a short summary and the PR URL. If you are blocked, call it with status "blocked" and the reason.',
-    `   No task_done tool? Send the report with SendMessage to the session that sent this message, its first line \`BATON-RESULT ${t.id}: <done|already-done|blocked>.\``,
-  ].join('\n')
-
-const askPrompt = (t: Task) =>
-  [
-    `Question #${t.id} from ${t.fromLabel}, about this repo:`,
-    '',
-    t.task,
-    '',
-    "Answer it from this repo: its code, docs, config and git history. Read only: change no files, and do not branch, commit or push.",
-    `Then call the answer tool with id "${t.id}" and your answer: short and specific, with file paths and line numbers where they help.`,
-    `   No answer tool? Send the answer with SendMessage to the session that sent this message, its first line \`BATON-RESULT ${t.id}: answered.\``,
-  ].join('\n')
 
 const notify = async ($: $, t: Task, status: string, detail: string) => {
   const text = `BATON-RESULT ${t.id}: ${status}. [${label(await $.session.root())}] "${short(t.task)}" ${detail}`
@@ -133,8 +120,12 @@ async function pickNext($: $, cfg: Config): Promise<string> {
   return `Started #${picked.id} "${short(picked.task)}".`
 }
 
-const newTask = async ($: $, task: string): Promise<Task> => ({
-  id: Date.now().toString(36).slice(-6),
+// The counter keeps ids made in the same millisecond apart.
+let seq = 0
+const newId = () => (Date.now() + seq++).toString(36).slice(-6)
+
+const newTask = async ($: $, task: string, id = newId()): Promise<Task> => ({
+  id,
   task,
   from: await $.session.id(),
   fromLabel: label(await $.session.root()),
@@ -149,11 +140,23 @@ async function resolveTarget($: $, agent: string, cfg: Config): Promise<Target> 
   return peers.me || peers.list.length ? matchTarget(peers, agent) : { to: agent }
 }
 
+/** One name, or several comma-separated (a fan-out: one task each, grouped). Any bad name sends nothing. */
 async function pass($: $, typed: string, task: string, cfg: Config): Promise<string> {
-  const target = await resolveTarget($, typed, cfg)
-  if ('error' in target) return target.error
-  const agent = target.to
-  const t = await newTask($, task)
+  const targets: Target[] = []
+  for (const name of typed.split(',').map(n => n.trim()).filter(Boolean)) targets.push(await resolveTarget($, name, cfg))
+  const errors = targets.flatMap(t => ('error' in t ? [t.error] : []))
+  if (errors.length || !targets.length) return errors.join('\n') || 'Usage: /pass <agent>[,<agent>…] <task>'
+  const agents = targets.flatMap(t => ('to' in t ? [t.to] : []))
+  const [only] = agents
+  if (only && agents.length === 1) return sendTask($, only, task, cfg, newId())
+  const group = newId()
+  const lines: string[] = []
+  for (const [i, agent] of agents.entries()) lines.push(await sendTask($, agent, task, cfg, `${group}${String.fromCharCode(97 + i)}`, group))
+  return `Passed #${group} to ${agents.length} sessions:\n${lines.join('\n')}`
+}
+
+async function sendTask($: $, agent: string, task: string, cfg: Config, id: string, group?: string): Promise<string> {
+  const t = await newTask($, task, id)
   const sent = await $.session.send({
     to: agent,
     // The full prompt rides along, so a receiver without this mod still gets the whole workflow.
@@ -161,7 +164,7 @@ async function pass($: $, typed: string, task: string, cfg: Config): Promise<str
   })
   if (!sent.isDelivered) return `Not delivered to ${agent}: ${sent.reason}`
   const now = await $.clock.now()
-  await changeSent($, list => [...list, { id: t.id, agent, task, status: 'sent', sentAt: now, updatedAt: now }])
+  await changeSent($, list => [...list, { id: t.id, agent, task, status: 'sent', sentAt: now, updatedAt: now, ...(group ? { group } : {}) }])
   return `Passed #${t.id} to ${agent}. It reports back here when it is queued, started and done.`
 }
 
@@ -226,6 +229,35 @@ async function refreshPeers($: EngineInterface, cfg: Config) {
   await update($, peersAtom, () => parsePeers(r.result.listing, cfg.hidden))
 }
 
+async function checkPrs($: $, poll: Poll) {
+  if (poll.isGhMissing) return
+  for (const s of (await loadSent($)).filter(isFollowed)) {
+    const r = await $.process.run(['gh', 'pr', 'view', s.prUrl ?? '', '--json', 'state,statusCheckRollup']).catch(() => undefined)
+    // gh is not installed or will not start: stop quietly for this load.
+    if (!r) return void (poll.isGhMissing = true)
+    const pr = r.exitCode === 0 ? prState(r.stdout) : undefined
+    if (pr) await changeSent($, list => list.map(x => (x.id === s.id ? { ...x, pr } : x)))
+  }
+}
+
+function followPrs($: $, poll: Poll) {
+  void checkPrs($, poll)
+  if (poll.isOn) return
+  poll.isOn = true
+  $.clock.every(PR_EVERY_MS, () => void checkPrs($, poll))
+}
+
+function parseCancel(text: string): { id: string; from: string } | undefined {
+  const raw = CANCEL_LINE.exec(text)?.[1]
+  if (!raw) return undefined
+  try {
+    const c = JSON.parse(raw) as Record<string, unknown>
+    return typeof c.id === 'string' && typeof c.from === 'string' ? { id: c.id, from: c.from } : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function hiddenFrom(pattern: string): Pick<Config, 'hidden' | 'warning'> {
   if (!pattern) return { hidden: DEFAULT_HIDDEN }
   try {
@@ -241,6 +273,7 @@ export const register: Register = (on, options) => {
     typeof options.branch_rule === 'string' && options.branch_rule.trim() ? options.branch_rule : DEFAULT_BRANCH_RULE
   const pattern = typeof options.hidden_sessions === 'string' ? options.hidden_sessions.trim() : ''
   const cfg: Config = { branchRule, ...hiddenFrom(pattern) }
+  const poll: Poll = { isOn: false, isGhMissing: false }
 
   on('session.start', async ($, e, next) => {
     await Promise.all([
@@ -248,9 +281,12 @@ export const register: Register = (on, options) => {
       $.command.register({ name: 'ask', description: 'Ask another named session a question about its repo', argumentHint: '<agent> <question>', immediate: true }),
       $.command.register({ name: 'baton', description: 'Show the task this session is working on and its backlog', immediate: true }),
       $.command.register({ name: 'baton-next', description: 'Pick up the next passed task (force: drop the active one first)', argumentHint: '[force]' }),
+      $.command.register({ name: 'baton-report', description: 'Report the outcome of a task that already left this session', argumentHint: '<id> <done|already-done|blocked> [PR URL] [summary]', immediate: true }),
+      $.command.register({ name: 'baton-cancel', description: 'Take back a task you passed, if it is still queued', argumentHint: '<id>', immediate: true }),
+      $.command.register({ name: 'baton-answer', description: 'Answer the question a session asked about a task you passed', argumentHint: '<id> <answer>', immediate: true }),
       $.tool.register({
         name: 'pass',
-        description: 'Pass a task to another named Claude session (an agent as ListAgents lists it). It queues the task, takes it to a pull request and reports back.',
+        description: 'Pass a task to another named Claude session (an agent as ListAgents lists it), or to several at once, comma-separated. It queues the task, takes it to a pull request and reports back.',
         inputSchema: {
           type: 'object',
           properties: { agent: { type: 'string' }, task: { type: 'string', description: 'What to change, in full: the receiver has none of this context.' } },
@@ -276,6 +312,11 @@ export const register: Register = (on, options) => {
         },
       }),
       $.tool.register({
+        name: 'ask_sender',
+        description: 'Ask the session that passed the active task a question you need answered to go on. Stop after calling it: the answer arrives as a message.',
+        inputSchema: { type: 'object', properties: { question: { type: 'string' } }, required: ['question'] },
+      }),
+      $.tool.register({
         name: 'task_done',
         description: 'Finish the passed task this session is working on: reports to the session that sent it and picks up the next queued task.',
         inputSchema: {
@@ -289,6 +330,7 @@ export const register: Register = (on, options) => {
     await changeSent($, list => list)
     void refreshPeers($, cfg)
     $.clock.every(PEERS_EVERY_MS, () => void refreshPeers($, cfg))
+    if ((await loadSent($)).some(isFollowed)) followPrs($, poll)
     return next(e)
   })
 
@@ -301,19 +343,46 @@ export const register: Register = (on, options) => {
       submitSoon($, question.id, askPrompt(question))
       return { consumed: `baton question #${question.id} received` }
     }
+    const cancel = parseCancel(e.text)
+    if (cancel) {
+      const hit = await serial(async () => {
+        const q = await load($)
+        const mine = (t: Task | null) => t?.id === cancel.id && t.from === cancel.from
+        const queued = q.backlog.find(mine)
+        if (queued) await save($, { ...q, backlog: q.backlog.filter(t => t !== queued) })
+        return queued ? { task: queued, isQueued: true } : mine(q.active) && q.active ? { task: q.active, isQueued: false } : undefined
+      })
+      if (hit?.isQueued) await notify($, hit.task, 'cancelled', 'was removed from the backlog.')
+      else if (hit) {
+        $.ui.toast(`baton: ${hit.task.fromLabel} asked to cancel #${hit.task.id}, but it is already running.`)
+        await notify($, hit.task, 'started', 'is already running, so it cannot be cancelled here.')
+      }
+      return { consumed: `baton cancel #${cancel.id}` }
+    }
+    const [, answerId, answerText] = ANSWER_LINE.exec(e.text) ?? []
+    const active = answerId ? (await load($)).active : null
+    if (active && answerText && active.id === answerId) {
+      submitSoon($, active.id, continuePrompt(active, answerText.trim()))
+      await notify($, active, 'started', 'has the answer and is carrying on.')
+      return { consumed: `baton answer for #${active.id}` }
+    }
     const [, id, status] = RESULT_LINE.exec(e.text) ?? []
     if (id && status) {
       // An answer is the text after its first line; any URL in it is not a PR.
       const answer = status === 'answered' ? clip(e.text.split('\n').slice(1).join(' ').trim(), 2000) : ''
-      const prUrl = status === 'answered' ? undefined : URL.exec(e.text)?.[0]
+      const question = status === 'waiting' ? e.text.split('\n')[1]?.trim() : undefined
+      const prUrl = status === 'answered' || status === 'waiting' ? undefined : URL.exec(e.text)?.[0]
       const now = await $.clock.now()
       const ours = (await loadSent($)).find(s => s.id === id)
       await changeSent($, list =>
         list.map(s =>
-          s.id === id ? { ...s, status, updatedAt: now, ...(prUrl ? { prUrl } : {}), ...(answer ? { answer } : {}) } : s,
+          s.id === id ? { ...s, status, updatedAt: now, ...(prUrl ? { prUrl } : {}), ...(answer ? { answer } : {}), ...(question ? { question } : {}) } : s,
         ),
       )
-      if (ours && FINAL.has(status)) $.ui.toast(`${ICONS[status] ?? '·'} ${ours.agent} ${status} #${id}${prUrl ? ` · ${prUrl}` : ''}`)
+      const extra = prUrl ?? question
+      if (ours && (FINAL.has(status) || status === 'waiting'))
+        $.ui.toast(`${ICONS[status] ?? '·'} ${ours.agent} ${status} #${id}${extra ? ` · ${extra}` : ''}`)
+      if (ours && prUrl && GITHUB_PR.test(prUrl)) followPrs($, poll)
       return next(e)
     }
     const task = parse(e.text)
@@ -369,6 +438,7 @@ export const register: Register = (on, options) => {
     const done = await serial(async () => {
       const q = await load($)
       if (q.active) await save($, { ...q, active: null })
+      if (q.active) await addFinished($, q.active)
       return q.active
     })
     if (!done) return { deny: 'No passed task is active in this session.' }
@@ -376,6 +446,49 @@ export const register: Register = (on, options) => {
     await notify($, done, String(status), `\n${summary}${pr}`)
     const after = AUTO_PICK ? await pickNext($, cfg) : 'Run /baton-next to pick up the next one.'
     return { result: `Reported #${done.id} to ${done.fromLabel}. ${after}` }
+  })
+
+  on('tool.call', { tool: /^mcp__baton__ask_sender$/ }, async ($, e) => {
+    const { question } = e as unknown as { question?: unknown }
+    if (typeof question !== 'string' || !question.trim()) return { deny: 'ask_sender needs a question.' }
+    const { active } = await load($)
+    if (!active) return { deny: 'No passed task is active in this session.' }
+    await notify($, active, 'waiting', waitingDetail(active.id, question.trim()))
+    return { result: `Asked ${active.fromLabel}. Stop here: the answer arrives as a message and the task carries on.` }
+  })
+
+  on('command.run', { command: 'baton-report' }, async ($, e) => {
+    const [id = '', status = '', ...rest] = e.args.trim().split(/\s+/)
+    if (!id || !STATUSES.includes(status as never))
+      return { text: `Usage: /baton-report <id> <${STATUSES.join('|')}> [PR URL] [summary]` }
+    const finished = await loadFinished($)
+    const t = finished.find(x => x.id === id)
+    if (!t) return { text: `No recent task #${id} here. Recent: ${finished.map(x => `#${x.id}`).join(', ') || 'none'}.` }
+    const url = rest[0] && /^https?:\/\//.test(rest[0]) ? rest[0] : undefined
+    const summary = (url ? rest.slice(1) : rest).join(' ') || 'Reported by the person here.'
+    await notify($, t, status, `\n${summary}${url ? `\nPR: ${url}` : ''}`)
+    return { text: `Reported #${id} to ${t.fromLabel}: ${status}.` }
+  })
+
+  on('command.run', { command: 'baton-cancel' }, async ($, e) => {
+    const id = e.args.trim()
+    if (!id) return { text: 'Usage: /baton-cancel <id>' }
+    const s = (await loadSent($)).find(x => x.id === id && !FINAL.has(x.status))
+    if (!s) return { text: `No open task #${id} passed from here.` }
+    const sent = await $.session.send({ to: s.agent, text: `${CANCEL_MARK}${JSON.stringify({ id, from: await $.session.id() })}` })
+    if (!sent.isDelivered) return { text: `Not delivered to ${s.agent}: ${sent.reason}` }
+    return { text: `Asked ${s.agent} to cancel #${id}. It replies "cancelled" if the task was still queued.` }
+  })
+
+  on('command.run', { command: 'baton-answer' }, async ($, e) => {
+    const [id = '', ...rest] = e.args.trim().split(/\s+/)
+    const answer = rest.join(' ')
+    if (!id || !answer) return { text: 'Usage: /baton-answer <id> <answer>' }
+    const s = (await loadSent($)).find(x => x.id === id && x.status === 'waiting')
+    if (!s) return { text: `No task #${id} is waiting on an answer.` }
+    const sent = await $.session.send({ to: s.agent, text: `BATON-ANSWER ${id}: ${answer}` })
+    if (!sent.isDelivered) return { text: `Not delivered to ${s.agent}: ${sent.reason}` }
+    return { text: `Answered #${id} for ${s.agent}.` }
   })
 
   on('command.run', { command: 'pass' }, async ($, e) => {
@@ -406,6 +519,7 @@ export const register: Register = (on, options) => {
     const dropped = await serial(async () => {
       const q = await load($)
       if (q.active && isForce) await save($, { ...q, active: null })
+      if (q.active && isForce) await addFinished($, q.active)
       return q.active
     })
     if (dropped && !isForce) return { text: `#${dropped.id} is still active. Let it finish (task_done), or run /baton-next force to drop it.` }
