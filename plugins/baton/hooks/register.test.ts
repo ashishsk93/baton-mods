@@ -92,14 +92,15 @@ test('ordinary peer messages pass through', async ($, on) => {
 
 const LISTING = `This session is launchpad-20 [31ab25] — the name other sessions use to message it.
 
-Peer sessions (2):
+Peer sessions (3):
   data-dashboards-ca [30c8e0]  ·  interactive  ·  idle  ·  started 28s ago
-  observer-sessions-35 [07c6f3]  ·  interactive  ·  busy  ·  started 4m ago`
+  observer-sessions-35 [07c6f3]  ·  interactive  ·  busy  ·  started 4m ago
+  api-server-7f [1a2b3c]  ·  interactive  ·  busy  ·  started 9m ago`
 
-test('parses this session and its peers from ListAgents', () => {
+test('parses this session and its peers from ListAgents, hiding claude-mem observers', () => {
   const peers = parsePeers(LISTING)
   expect(peers.me).toBe('launchpad-20 [31ab25]')
-  expect(peers.list.map(p => `${p.name}:${p.state}`)).toEqual(['data-dashboards-ca:idle', 'observer-sessions-35:busy'])
+  expect(peers.list.map(p => `${p.name}:${p.state}`)).toEqual(['data-dashboards-ca:idle', 'api-server-7f:busy'])
 })
 
 const BAND = {

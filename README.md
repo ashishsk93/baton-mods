@@ -6,17 +6,27 @@
 
 One session per repo. When work belongs somewhere else, hand it off and keep going.
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue)](plugins/baton/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue)](plugins/baton/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757)](https://claude.com/claude-code)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 </div>
 
 ```
-/pass data-dashboards raise the service's CPU to 2048
+/pass api-server add rate limiting to the /login endpoint
 ```
 
-That's it. The `data-dashboards` session picks it up, takes it to a pull request and tells you when it's done.
+That's it. The `api-server` session picks it up, takes it to a pull request and tells you when it's done.
+
+More ways to use it:
+
+```
+/pass web-app fix the dark mode toggle on the settings page
+/pass infra raise the worker service's memory to 4 GB
+/pass docs-site document the new /v2/orders endpoint
+```
+
+Or just ask Claude: *"pass this to web-app: the signup form should trim whitespace from emails"*.
 
 ## ✨ What the receiving session does
 
@@ -32,9 +42,9 @@ That's it. The `data-dashboards` session picks it up, takes it to a pull request
 
 ```mermaid
 sequenceDiagram
-    participant You as launchpad (you)
-    participant R as data-dashboards
-    You->>R: /pass data-dashboards raise CPU to 2048
+    participant You as web-app (you)
+    participant R as api-server
+    You->>R: /pass api-server add rate limiting to /login
     alt busy or uncommitted changes
         R-->>You: queued, position 2
     else free
@@ -50,13 +60,13 @@ sequenceDiagram
 A band above the prompt shows where everything stands. Press a badge to expand it. In fullscreen, a side panel shows the details.
 
 ```
-◆ launchpad-20   ◎ 3 (1 busy)   ▶ 1 ≡ 2   → 1/4
+◆ web-app-3f   ◎ 3 (1 busy)   ▶ 1 ≡ 2   → 1/4
 ```
 
 | Badge | Means |
 | --- | --- |
-| `◆ launchpad-20` | This session |
-| `◎ 3 (1 busy)` | Other sessions, and how many are busy |
+| `◆ web-app-3f` | This session |
+| `◎ 3 (1 busy)` | Other sessions, and how many are busy (claude-mem's observer sessions are hidden) |
 | `▶ 1` | Tasks this session is working on |
 | `≡ 2` | Tasks queued here |
 | `→ 1/4` | Tasks you passed on: open / total |

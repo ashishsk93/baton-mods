@@ -2,15 +2,14 @@ import type { Panel, Peer, Peers, Queue, Sent } from '../types'
 
 export const FINAL = new Set(['done', 'already-done', 'blocked', 'dropped'])
 const PEER_LINE = /^\s+(\S+) \[(\w+)\]\s+·\s+([\w-]+)\s+·\s+([\w-]+)/gm
+// claude-mem's background summarisers: not sessions a person passes work to.
+const HIDDEN = /^observer-sessions-/
 
 export function parsePeers(listing: string): Peers {
   const me = /^This session is (\S+(?: \[\w+\])?)/m.exec(listing)?.[1] ?? ''
-  const list: Peer[] = [...listing.matchAll(PEER_LINE)].map(m => ({
-    name: m[1] ?? '',
-    ref: m[2] ?? '',
-    mode: m[3] ?? '',
-    state: m[4] ?? '',
-  }))
+  const list: Peer[] = [...listing.matchAll(PEER_LINE)]
+    .map(m => ({ name: m[1] ?? '', ref: m[2] ?? '', mode: m[3] ?? '', state: m[4] ?? '' }))
+    .filter(p => !HIDDEN.test(p.name))
   return { me, list }
 }
 
