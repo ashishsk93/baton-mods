@@ -6,7 +6,7 @@
 
 One session per repo. When work belongs somewhere else, hand it off and keep going.
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue)](plugins/baton/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue)](plugins/baton/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757)](https://claude.com/claude-code)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -37,6 +37,18 @@ Or just ask Claude: *"pass this to web-app: the signup form should trim whitespa
 | 🛠️ **Takes it to a PR** | Branches by your rule, makes the change, runs the repo's checks, commits, pushes, opens a pull request. |
 | 📣 **Reports back** | Your session gets the outcome and the PR link. |
 | ⏭️ **Picks up the next** | On its own, or when you run `/baton-next`. |
+
+## ❓ Just ask
+
+Not every question needs a PR. Ask another session about its repo and get the answer back here:
+
+```
+/ask api-server which env vars does the auth middleware read?
+/ask infra what is the worker service's memory limit right now?
+/ask web-app where do we format currency, and does it handle JPY?
+```
+
+The receiving session answers from its code, docs, config and git history. It changes nothing: no branch, no commit, no PR. Questions skip the task queue, so they get answered even while that session is busy with a task or has uncommitted changes. The answer arrives in your session as a message, and the `→` panel shows it under the question.
 
 ## 🔁 How a handoff flows
 
@@ -85,6 +97,7 @@ Needs Claude Code **v2.1.287** or later. Install it on every machine whose sessi
 | Command | What it does |
 | --- | --- |
 | `/pass <session> <task>` | Pass a task to a session by its name in ListAgents. You can also just ask Claude to "pass this to …". |
+| `/ask <session> <question>` | Ask a session a question about its repo. It answers read-only and changes nothing. |
 | `/baton` | Show the task this session is working on and its backlog |
 | `/baton-next [force]` | Pick up the next queued task; `force` drops a stuck one first |
 

@@ -1,6 +1,6 @@
 import type { Panel, Peer, Peers, Queue, Sent } from '../types'
 
-export const FINAL = new Set(['done', 'already-done', 'blocked', 'dropped'])
+export const FINAL = new Set(['done', 'already-done', 'blocked', 'dropped', 'answered'])
 const PEER_LINE = /^\s+(\S+) \[(\w+)\]\s+·\s+([\w-]+)\s+·\s+([\w-]+)/gm
 // claude-mem's background summarisers: not sessions a person passes work to.
 const HIDDEN = /^observer-sessions-/
@@ -62,11 +62,14 @@ export function rowsFor(panel: Panel, v: View): Row[] {
     case 'sent':
       return [
         ...(sent.length ? [] : [{ key: 'none', text: 'Nothing passed on yet.', color: 'gray' }]),
-        ...sent.map(s => ({
-          key: s.id,
-          text: `#${s.id} → ${s.agent}  ${s.status}  ${s.task}${s.prUrl ? `  ${s.prUrl}` : ''}`,
-          color: s.status === 'blocked' ? 'red' : FINAL.has(s.status) ? 'green' : 'yellow',
-        })),
+        ...sent.flatMap(s => [
+          {
+            key: s.id,
+            text: `${s.kind === 'ask' ? '? ' : ''}#${s.id} → ${s.agent}  ${s.status}  ${s.task}${s.prUrl ? `  ${s.prUrl}` : ''}`,
+            color: s.status === 'blocked' ? 'red' : FINAL.has(s.status) ? 'green' : 'yellow',
+          },
+          ...(s.answer ? [{ key: `${s.id}-answer`, text: `  ↳ ${s.answer}`, color: 'gray' }] : []),
+        ]),
         ...(sent.some(s => FINAL.has(s.status)) ? [{ key: 'clear', text: 'clear finished', isClear: true as const }] : []),
       ]
   }

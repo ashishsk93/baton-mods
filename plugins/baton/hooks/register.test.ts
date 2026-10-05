@@ -168,3 +168,45 @@ test('the branch_rule option goes into the task prompt', { options: { branch_rul
   await w.clock.advance(0)
   expect(w.submitted[0]).toContain('Use release/<slug>')
 })
+
+const asked = (id: string, question: string) =>
+  `BATON-ASK ${JSON.stringify({ id, task: question, from: 'sender-session', fromLabel: 'web-app' })}\n\nQuestion from web-app: ${question}`
+
+test('a question is answered read-only, even while busy, and the answer goes back', async ($, on) => {
+  const w = world(on, { value: true })
+  await $.session.receive({ origin: { kind: 'peer' }, text: passed('t1', 'busy work') })
+  const r = await $.session.receive({ origin: { kind: 'peer' }, text: asked('q1', 'where is auth configured?') })
+  expect(r.consumed).toBeDefined()
+  await w.clock.advance(0)
+  expect(w.submitted.length).toBe(1)
+  expect(w.submitted[0]).toContain('where is auth configured?')
+  expect(w.submitted[0]).toContain('Read only')
+  expect((await $.command.run({ command: 'baton', args: '' } as never)).text).toContain('1. #t1')
+
+  const done = await $.tool.call({ tool: 'mcp__baton__answer', id: 'q1', answer: 'src/auth/config.ts:12' } as never)
+  expect(JSON.stringify(done)).toContain('Answered #q1')
+  const reply = w.sent.find(t => t.startsWith('BATON-RESULT q1: answered'))
+  expect(reply).toContain('src/auth/config.ts:12')
+  const again = await $.tool.call({ tool: 'mcp__baton__answer', id: 'q1', answer: 'twice' } as never)
+  expect(JSON.stringify(again)).toContain('No open question')
+})
+
+test('/ask sends a question and shows the answer when it comes back', async ($, on) => {
+  const w = world(on)
+  const out = await $.command.run({ command: 'ask', args: 'api-server-7f where is auth configured?' } as never)
+  const id = /#(\w+)/.exec(out.text ?? '')?.[1]
+  expect(w.sent[0]).toContain('BATON-ASK')
+  expect(w.sent[0]).toContain('where is auth configured?')
+
+  await $.session.receive({
+    origin: { kind: 'peer' },
+    text: `BATON-RESULT ${id}: answered. [api] "where is auth configured?"\nIn src/auth/config.ts:12, see https://example.com/doc`,
+  })
+  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  expect((await ui.find({ key: 'sent' }))?.text).toContain('→ 0/1')
+  await ui.press({ key: 'sent' })
+  expect(await ui.find({ text: /\? #\w+ → api-server-7f\s+answered/ })).toBeDefined()
+  expect(await ui.find({ text: /↳ In src\/auth\/config\.ts:12/ })).toBeDefined()
+  // A URL inside an answer is not taken as a PR link on the question row.
+  expect(await ui.find({ text: /configured\?\s+https/ })).toBeUndefined()
+})
