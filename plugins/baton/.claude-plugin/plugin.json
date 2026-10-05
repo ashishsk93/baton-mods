@@ -1,6 +1,6 @@
 {
   "name": "baton",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Pass tasks between named Claude Code sessions: the receiver queues them, works each to a pull request, reports back and picks up the next. A band and panel show your sessions and tasks.",
   "author": {
     "name": "Ashish S Kumar"
