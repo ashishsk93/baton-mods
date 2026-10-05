@@ -15,7 +15,7 @@ type $ = EngineInterface
 /** PR follow-up for this load: whether its timer runs, and whether `gh` turned out to be missing. */
 type Poll = { isOn: boolean; isGhMissing: boolean }
 /** The person's options, read once per load. `warning` is a bad hidden_sessions pattern, toasted once. */
-type Config = { branchRule: string; hidden: RegExp; warning?: { text: string; isShown: boolean } }
+type Config = { branchRule: string; hidden: RegExp; worktree: boolean; warning?: { text: string; isShown: boolean } }
 
 const MARK = 'BATON-PASS '
 const MARK_LINE = /BATON-PASS (\{.*\})/
@@ -91,8 +91,10 @@ const notify = async ($: $, t: Task, status: string, detail: string) => {
   return $.session.send({ to: { sessionId: t.from }, text }).catch(err => $.ui.toast(`baton: cannot reach ${t.fromLabel}: ${err}`))
 }
 
-async function busyReason($: $, q: Queue): Promise<string | undefined> {
+async function busyReason($: $, q: Queue, cfg: Config): Promise<string | undefined> {
   if (q.active) return `busy with #${q.active.id} "${short(q.active.task)}"`
+  // A worktree leaves this checkout's uncommitted work alone, so it is no reason to wait.
+  if (cfg.worktree) return undefined
   const git = await $.process.run(['git', 'status', '--porcelain'], { cwd: await $.session.root() })
   return git.exitCode === 0 && git.stdout.trim() ? 'uncommitted changes are already in place' : undefined
 }
@@ -101,7 +103,10 @@ async function busyReason($: $, q: Queue): Promise<string | undefined> {
 // engine runs the prompt once this session is idle.
 const submitSoon = ($: $, id: string, text: string) =>
   void $.clock.after(0, () => void $.prompt.submit({ text }).catch(err => $.ui.toast(`baton: could not start #${id}: ${err}`)))
-const start = ($: $, t: Task, cfg: Config) => submitSoon($, t.id, taskPrompt(t, cfg.branchRule))
+async function start($: $, t: Task, cfg: Config) {
+  const worktree = cfg.worktree ? `../${label(await $.session.root())}-baton-${t.id}` : undefined
+  submitSoon($, t.id, taskPrompt(t, cfg.branchRule, worktree))
+}
 
 /** Moves the next backlog task to active and starts it; answers what happened. */
 async function pickNext($: $, cfg: Config): Promise<string> {
@@ -109,13 +114,13 @@ async function pickNext($: $, cfg: Config): Promise<string> {
     const q = await load($)
     const [next, ...rest] = q.backlog
     if (!next) return 'The backlog is empty.'
-    const why = await busyReason($, q)
+    const why = await busyReason($, q, cfg)
     if (why) return `Not picking up the next task: ${why}.`
     await save($, { active: next, backlog: rest })
     return next
   })
   if (typeof picked === 'string') return picked
-  start($, picked, cfg)
+  await start($, picked, cfg)
   await notify($, picked, 'started', 'is now being worked on.')
   return `Started #${picked.id} "${short(picked.task)}".`
 }
@@ -272,7 +277,7 @@ export const register: Register = (on, options) => {
   const branchRule =
     typeof options.branch_rule === 'string' && options.branch_rule.trim() ? options.branch_rule : DEFAULT_BRANCH_RULE
   const pattern = typeof options.hidden_sessions === 'string' ? options.hidden_sessions.trim() : ''
-  const cfg: Config = { branchRule, ...hiddenFrom(pattern) }
+  const cfg: Config = { branchRule, worktree: options.worktree === true, ...hiddenFrom(pattern) }
   const poll: Poll = { isOn: false, isGhMissing: false }
 
   on('session.start', async ($, e, next) => {
@@ -389,13 +394,13 @@ export const register: Register = (on, options) => {
     if (!task) return next(e)
     const outcome = await serial(async () => {
       const q = await load($)
-      const why = await busyReason($, q)
+      const why = await busyReason($, q, cfg)
       if (why) {
         await save($, { ...q, backlog: [...q.backlog, task] })
         return { status: 'queued', detail: `is in the backlog at position ${q.backlog.length + 1} (${why}).` }
       }
       await save($, { ...q, active: task })
-      start($, task, cfg)
+      await start($, task, cfg)
       return { status: 'started', detail: 'is now being worked on.' }
     })
     await notify($, task, outcome.status, outcome.detail)

@@ -1,6 +1,6 @@
 {
   "name": "baton",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Pass tasks between named Claude Code sessions: the receiver queues them, works each to a pull request, reports back and picks up the next. A band and panel show your sessions and tasks.",
   "author": {
     "name": "Ashish S Kumar"
@@ -18,6 +18,12 @@
       "title": "Hidden sessions",
       "description": "A regular expression. Sessions whose names match it are left out of the band and cannot be passed to. Default hides claude-mem's observer sessions.",
       "default": "^observer-sessions-"
+    },
+    "worktree": {
+      "type": "boolean",
+      "title": "Worktree",
+      "description": "Work each passed task in a git worktree of its own, so uncommitted changes in this checkout no longer hold tasks in the queue.",
+      "default": false
     }
   }
 }

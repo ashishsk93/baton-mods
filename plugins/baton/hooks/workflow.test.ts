@@ -175,3 +175,25 @@ test('PR follow-up skips non-GitHub links and stops quietly without gh', async (
   expect(w.ghCalls).toHaveLength(1)
   expect(w.toasts.filter(t => t.includes('gh'))).toEqual([])
 })
+
+// ---------- #13 worktree mode ----------
+
+test('worktree mode takes a task despite uncommitted changes and works in a worktree', { options: { worktree: true } }, async ($, on) => {
+  const w = world(on, { value: true })
+  await $.session.receive({ origin: { kind: 'peer' }, text: passed('w1', 'rotate logs') })
+  expect(w.sent[0]).toContain('BATON-RESULT w1: started')
+  await w.clock.advance(0)
+  expect(w.submitted[0]).toContain('git worktree add ../data_dashboards_db-baton-w1')
+  expect(w.submitted[0]).toContain('git worktree remove ../data_dashboards_db-baton-w1')
+  expect(w.submitted[0]).toContain('Branch off an up-to-date default branch')
+
+  await $.session.receive({ origin: { kind: 'peer' }, text: passed('w2', 'second') })
+  expect(w.sent[1]).toContain('busy with #w1')
+})
+
+test('without worktree mode the prompt works in this checkout', async ($, on) => {
+  const w = world(on)
+  await $.session.receive({ origin: { kind: 'peer' }, text: passed('n1', 'rotate logs') })
+  await w.clock.advance(0)
+  expect(w.submitted[0]).not.toContain('git worktree')
+})

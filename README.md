@@ -6,7 +6,7 @@
 
 One session per repo. When work belongs somewhere else, hand it off and keep going.
 
-[![Version](https://img.shields.io/badge/version-1.5.0-blue)](plugins/baton/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.6.0-blue)](plugins/baton/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757)](https://claude.com/claude-code)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -32,7 +32,7 @@ Or just ask Claude: *"pass this to web-app: the signup form should trim whitespa
 
 | | |
 | --- | --- |
-| 📥 **Queues it** | If it's already on a task or has uncommitted changes, the task waits in line and you hear your place. |
+| 📥 **Queues it** | If it's already on a task or has uncommitted changes, the task waits in line and you hear your place. With **Worktree** on, uncommitted changes don't hold it up. |
 | 🔍 **Checks first** | If the change is already in place, it says so and changes nothing. |
 | 🛠️ **Takes it to a PR** | Branches by your rule, makes the change, runs the repo's checks, commits, pushes, opens a pull request. |
 | 📣 **Reports back** | Your session gets the outcome and the PR link. |
@@ -139,6 +139,7 @@ In `/config` → **baton**:
 | Option | What it does |
 | --- | --- |
 | **Branch rule** | How the receiving session names the branch. A repo's own instructions win when they name one. |
+| **Worktree** | Off by default. When on, each passed task is worked in its own `git worktree` next to the repo (`../<repo>-baton-<id>`), and the worktree is removed once the PR is open. Your uncommitted work stays untouched, and tasks no longer wait for a clean tree. The trade-off: a second checkout on disk while the task runs, and the session works outside its own folder. |
 | **Hidden sessions** | A regular expression. Sessions whose names match are left out of the band and can't be passed to. The default, `^observer-sessions-`, hides claude-mem's background sessions. |
 
 Session names don't need their suffix: `/pass infra …` goes to `infra-a9` when it's the only match. If a name is ambiguous or unknown, baton lists the near matches and sends nothing. It also refuses to pass a task to the session you're in.
