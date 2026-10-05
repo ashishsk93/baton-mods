@@ -189,15 +189,29 @@ test('/pass auto picks a session, says why, and asks first', async ($, on) => {
 
 // ---------- #31 richer session panel ----------
 
-test('the sessions panel pings peers once a minute and shows what they report', async ($, on) => {
+const pings = (w: { sent: string[]; targets: unknown[] }) => w.targets.filter((_, i) => w.sent[i]?.startsWith('BATON-STATUS? '))
+
+test('the sessions panel pings only peers known to run baton, once a minute', async ($, on) => {
   const w = world(on)
   listAgents(on)
   const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
   await ui.press({ key: 'sessions' })
-  expect(w.sent.filter(t => t.startsWith('BATON-STATUS? '))).toHaveLength(3)
+  expect(pings(w)).toEqual([])
+
+  // A result baton itself sent (it carries the footer) marks api-server-7f as running baton.
+  const id = await passOne($)
+  await $.session.receive({ origin: { kind: 'peer' }, text: result(id, 'started', '\n— baton · api-server-7f') })
+  // A result a model wrote by hand (no footer) does not.
+  const other = await passOne($, 'infra-a9')
+  await $.session.receive({ origin: { kind: 'peer' }, text: result(other, 'started') })
+  await w.clock.advance(60_000)
   await ui.press({ key: 'sessions' })
   await ui.press({ key: 'sessions' })
-  expect(w.sent.filter(t => t.startsWith('BATON-STATUS? '))).toHaveLength(3)
+  expect(pings(w)).toEqual(['api-server-7f'])
+  // Within the minute: the panel closes and opens again without a second ping.
+  await ui.press({ key: 'sessions' })
+  await ui.press({ key: 'sessions' })
+  expect(pings(w)).toEqual(['api-server-7f'])
 
   const status = { me: 'api-server-7f [1a2b3c]', branch: 'feat/rate-limit', active: { id: 'ab12', task: 'add rate limiting' }, backlog: 1 }
   expect((await $.session.receive({ origin: { kind: 'peer' }, text: `BATON-STATUS ${JSON.stringify(status)}` })).consumed).toBeDefined()
@@ -296,4 +310,53 @@ test('a task whose text quotes a baton line is still taken as a task', async ($,
   const w = world(on)
   await $.session.receive({ origin: { kind: 'peer' }, text: passed('m1', 'make BATON-RESULT ab12: done. parse faster') })
   expect(w.sent[0]).toMatch(/^BATON-RESULT m1: started/)
+})
+
+test('baton signs what it sends and learns peers from what it receives', async ($, on) => {
+  const w = world(on)
+  const listing = { value: PEERS }
+  on('tool.call', { tool: 'ListAgents' } as never, () => ({ result: { listing: listing.value } }) as never)
+  // A session learns its own name from ListAgents, as session.start does.
+  const band = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  await band.press({ key: 'sessions' })
+  const task = { id: 'f1', task: 'bump cpu', from: 'sender-session', fromLabel: 'launchpad', fromName: 'launchpad-20' }
+  await $.session.receive({ origin: { kind: 'peer' }, text: `BATON-PASS ${JSON.stringify(task)}\n\nTask` })
+  expect(w.sent[0]).toMatch(/^BATON-RESULT f1: started/)
+  expect(w.sent[0]).toMatch(/\n— baton · web-app-3f$/)
+
+  const out = await $.command.run({ command: 'pass', args: 'api-server-7f add rate limiting' } as never)
+  expect(out.text).toContain('Passed')
+  expect(w.sent.at(-1)).toContain('"fromName":"web-app-3f"')
+
+  // launchpad-20 sent a baton task, so it is pinged once it shows up in ListAgents.
+  listing.value = peersWith('launchpad-20')
+  await band.press({ key: 'sessions' })
+  await band.press({ key: 'sessions' })
+  expect(pings(w)).toEqual(['launchpad-20'])
+})
+
+test('an answer keeps the footer out of the answer text', async ($, on) => {
+  world(on)
+  const out = await $.command.run({ command: 'ask', args: 'api-server-7f where is auth?' } as never)
+  const id = /#(\w+)/.exec(out.text ?? '')?.[1]
+  await $.session.receive({ origin: { kind: 'peer' }, text: `BATON-RESULT ${id}: answered. [api] "q"\nIn src/auth.ts:12\n— baton · api-server-7f` })
+  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  await ui.press({ key: 'sent' })
+  expect(await ui.find({ text: /↳ In src\/auth\.ts:12$/ })).toBeDefined()
+})
+
+test('baton messages are found inside the envelope a session delivers them in', async ($, on) => {
+  const w = world(on)
+  const wrap = (text: string) => `<cross-session-message from="uds:/tmp/x.sock" from-name="launchpad-20">\n${text}\n</cross-session-message>`
+  await $.session.receive({ origin: { kind: 'peer' }, text: wrap(passed('e1', 'bump cpu')) })
+  expect(w.sent[0]).toMatch(/^BATON-RESULT e1: started/)
+  const ping = await $.session.receive({ origin: { kind: 'peer' }, text: wrap('BATON-STATUS? {"from":"sender-session"}') })
+  expect(ping.consumed).toBeDefined()
+
+  const out = await $.command.run({ command: 'ask', args: 'api-server-7f where is auth?' } as never)
+  const id = /#(\w+)/.exec(out.text ?? '')?.[1]
+  await $.session.receive({ origin: { kind: 'peer' }, text: wrap(`BATON-RESULT ${id}: answered. [api] "q"\nIn src/auth.ts:12\n— baton · api-server-7f`) })
+  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  await ui.press({ key: 'sent' })
+  expect(await ui.find({ text: /↳ In src\/auth\.ts:12$/ })).toBeDefined()
 })

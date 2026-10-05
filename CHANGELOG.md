@@ -2,6 +2,12 @@
 
 All notable changes to the baton plugin. Versions match `plugins/baton/.claude-plugin/plugin.json`.
 
+## 1.7.1 — 2026-10-05
+
+### Fixed
+- The sessions panel only pings sessions known to run baton. A session without it read the ping as a message and answered it. Sessions become known from a status reply, from a result baton itself sent (it now ends with `— baton · <session>`), or from a task, question or ping that names its sender.
+- baton messages are found wherever the delivery wraps them (for example `<cross-session-message …>`), still keyed on the first baton mark. 1.7.0 required the mark at the very start of a delivery.
+
 ## 1.7.0 — 2026-10-05
 
 ### Added

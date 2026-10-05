@@ -6,7 +6,7 @@
 
 One session per repo. When work belongs somewhere else, hand it off and keep going.
 
-[![Version](https://img.shields.io/badge/version-1.7.0-blue)](plugins/baton/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.7.1-blue)](plugins/baton/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757)](https://claude.com/claude-code)
 [![plugin checks](https://github.com/ashishsk93/baton-mods/actions/workflows/plugin-checks.yml/badge.svg)](https://github.com/ashishsk93/baton-mods/actions/workflows/plugin-checks.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -174,7 +174,7 @@ baton is a mod: it runs inside Claude Code with your permissions. It:
 - runs `gh pr view` for GitHub PRs it follows (skipped quietly when `gh` isn't installed),
 - submits prompts in the receiving session, and starts a read-only subagent (Read, Grep, Glob) to answer questions,
 - makes one small model call per `/pass auto`,
-- sends messages between your own local sessions, including a status ping when you open the sessions panel (at most once a minute).
+- sends messages between your own local sessions, including a status ping when you open the sessions panel (at most once a minute, and only to sessions that have shown they run baton).
 
 Turn on **Confirm tasks** to approve every task and question yourself, and use **Accept from** to limit which sessions can send them.
 
