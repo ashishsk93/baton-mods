@@ -3,14 +3,29 @@ import type { Panel, Peer, Peers, Queue, Sent } from '../types'
 export const FINAL = new Set(['done', 'already-done', 'blocked', 'dropped', 'answered'])
 const PEER_LINE = /^\s+(\S+) \[(\w+)\]\s+·\s+([\w-]+)\s+·\s+([\w-]+)/gm
 // claude-mem's background summarisers: not sessions a person passes work to.
-const HIDDEN = /^observer-sessions-/
+export const DEFAULT_HIDDEN = /^observer-sessions-/
 
-export function parsePeers(listing: string): Peers {
+export function parsePeers(listing: string, hidden: RegExp = DEFAULT_HIDDEN): Peers {
   const me = /^This session is (\S+(?: \[\w+\])?)/m.exec(listing)?.[1] ?? ''
   const list: Peer[] = [...listing.matchAll(PEER_LINE)]
     .map(m => ({ name: m[1] ?? '', ref: m[2] ?? '', mode: m[3] ?? '', state: m[4] ?? '' }))
-    .filter(p => !HIDDEN.test(p.name))
+    .filter(p => !hidden.test(p.name))
   return { me, list }
+}
+
+export type Target = { to: string } | { error: string }
+
+/** Where a typed session name goes: itself, the one peer it is a prefix of, or an error naming the near misses. */
+export function matchTarget(peers: Peers, agent: string): Target {
+  const name = agent.replace(/ \[\w+\]$/, '')
+  if (name && name === peers.me.split(' ')[0]) return { error: `${agent} is this session. Pass it to another one.` }
+  if (peers.list.some(p => p.name === name)) return { to: agent }
+  const starts = peers.list.filter(p => p.name.startsWith(name))
+  const [only] = starts
+  if (only && starts.length === 1) return { to: only.name }
+  const near = starts.length ? starts : peers.list.filter(p => p.name.includes(name) || name.includes(p.name))
+  if (near.length) return { error: `No session named ${agent}. Did you mean ${near.map(p => p.name).join(', ')}?` }
+  return { error: `No session named ${agent}. Sessions: ${peers.list.map(p => p.name).join(', ') || 'none'}.` }
 }
 
 export type View = { peers: Peers; queue: Queue; sent: Sent[]; open: Panel | null; now: number }
