@@ -6,7 +6,7 @@
 
 One session per repo. When work belongs somewhere else, hand it off and keep going.
 
-[![Version](https://img.shields.io/badge/version-1.6.0-blue)](plugins/baton/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.7.0-blue)](plugins/baton/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757)](https://claude.com/claude-code)
 [![plugin checks](https://github.com/ashishsk93/baton-mods/actions/workflows/plugin-checks.yml/badge.svg)](https://github.com/ashishsk93/baton-mods/actions/workflows/plugin-checks.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -53,6 +53,14 @@ Each session gets its own task. In the `→` panel they show as one group, `◇ 
 
 If the receiving session hits something only you can answer, it asks instead of guessing. You get a toast and a `? waiting` row with the question. Reply with `/baton-answer <id> <answer>` and it carries on.
 
+Some changes have an order. Chain the next one to an earlier task, and baton passes it once that task is done and its PR merges:
+
+```
+/pass web-app after #k3x9p2 switch the client to /v2/orders
+```
+
+Not sure which session owns it? `/pass auto <task>` picks one, tells you why, and asks before sending. A session that isn't running yet? baton offers to hold the task (`‖ held`) and sends it when the session shows up, for up to a day.
+
 ## ❓ Just ask
 
 Not every question needs a PR. Ask another session about its repo and get the answer back here:
@@ -63,7 +71,7 @@ Not every question needs a PR. Ask another session about its repo and get the an
 /ask web-app where do we format currency, and does it handle JPY?
 ```
 
-The receiving session answers from its code, docs, config and git history. It changes nothing: no branch, no commit, no PR. Questions skip the task queue, so they get answered even while that session is busy with a task or has uncommitted changes. The answer arrives in your session as a message, and the `→` panel shows it under the question.
+The receiving session answers with a read-only helper (Read, Grep and Glob only), so the question never lands in the middle of its own work. It changes nothing: no branch, no commit, no PR. Questions skip the task queue, so they get answered even while that session is busy with a task or has uncommitted changes. The answer arrives in your session as a message, and the `→` panel shows it under the question.
 
 ## 🔁 How a handoff flows
 
@@ -130,10 +138,13 @@ Needs Claude Code **v2.1.287** or later. Install it on every machine whose sessi
 | Command | What it does |
 | --- | --- |
 | `/pass <session>[,<session>…] <task>` | Pass a task to a session by its name in ListAgents, or to several at once. You can also just ask Claude to "pass this to …". |
+| `/pass <session> after #<id> <task>` | Pass it once task `<id>` (or fan-out group) is done and its PR merges; skipped if that task fails |
+| `/pass auto <task>` | Let baton pick the session; it says why and asks before sending |
 | `/ask <session> <question>` | Ask a session a question about its repo. It answers read-only and changes nothing. |
 | `/baton` | Show the task this session is working on and its backlog |
+| `/baton log [today\|week]` | What was passed from here and received here, with PRs and how long each took |
 | `/baton-next [force]` | Pick up the next queued task; `force` drops a stuck one first |
-| `/baton-cancel <id>` | Take back a task you passed. The receiver drops it if it's still queued, and says so if it's already running. |
+| `/baton-cancel <id>` | Take back a task you passed. The receiver drops it if it's still queued, and says so if it's already running. Held and chained tasks are cancelled right away. |
 | `/baton-answer <id> <answer>` | Answer a question a receiving session asked about a task you passed |
 | `/baton-report <id> <done\|already-done\|blocked> [PR URL] [summary]` | On the receiving side: send the real outcome of a task that already left the queue, e.g. one that was blocked and you then finished by hand |
 
@@ -145,6 +156,8 @@ In `/config` → **baton**:
 | --- | --- |
 | **Branch rule** | How the receiving session names the branch. A repo's own instructions win when they name one. |
 | **Worktree** | Off by default. When on, each passed task is worked in its own `git worktree` next to the repo (`../<repo>-baton-<id>`), and the worktree is removed once the PR is open. Your uncommitted work stays untouched, and tasks no longer wait for a clean tree. The trade-off: a second checkout on disk while the task runs, and the session works outside its own folder. |
+| **Confirm tasks** | Off by default. When on, a passed task or question waits for you: **Start**, **Queue** or **Decline**. The sender hears `declined` if you say no. |
+| **Accept from** | A regular expression on the sender's repo name. Tasks and questions from anyone else are declined. Empty accepts every session. |
 | **Hidden sessions** | A regular expression. Sessions whose names match are left out of the band and can't be passed to. The default, `^observer-sessions-`, hides claude-mem's background sessions. |
 
 Session names don't need their suffix: `/pass infra …` goes to `infra-a9` when it's the only match. If a name is ambiguous or unknown, baton lists the near matches and sends nothing. It also refuses to pass a task to the session you're in.
@@ -157,10 +170,13 @@ The default branch rule:
 
 baton is a mod: it runs inside Claude Code with your permissions. It:
 
-- runs `git status` in the session's repo,
+- runs `git status` and `git branch --show-current` in the session's repo,
 - runs `gh pr view` for GitHub PRs it follows (skipped quietly when `gh` isn't installed),
-- submits prompts in the receiving session,
-- sends messages between your own local sessions.
+- submits prompts in the receiving session, and starts a read-only subagent (Read, Grep, Glob) to answer questions,
+- makes one small model call per `/pass auto`,
+- sends messages between your own local sessions, including a status ping when you open the sessions panel (at most once a minute).
+
+Turn on **Confirm tasks** to approve every task and question yourself, and use **Accept from** to limit which sessions can send them.
 
 Run `claude plugin validate plugins/baton` to see the full list before you install it.
 

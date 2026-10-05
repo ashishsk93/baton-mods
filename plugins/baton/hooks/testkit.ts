@@ -17,7 +17,8 @@ export function world(on: On, dirty = { value: false }, gh: { value?: string | E
   mock.store(on)
   const clock = mock.clock(on)
   on('session.root', () => ({ value: '/repos/data_dashboards_db' }))
-  on('session.id', () => ({ value: 'receiver-session' }))
+  const sid = { value: 'receiver-session' }
+  on('session.id', () => ({ value: sid.value }))
   on('ui.status', () => ({ value: undefined }))
   const toasts: string[] = []
   on('ui.toast', (_$, e) => {
@@ -29,6 +30,7 @@ export function world(on: On, dirty = { value: false }, gh: { value?: string | E
     value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   })
   on('process.run', (_$, e) => {
+    if (e.argv[0] === 'git' && e.argv[1] === 'branch') return ran(0, 'main\n')
     if (e.argv[0] !== 'gh') return ran(0, dirty.value ? ' M Makefile\n' : '')
     ghCalls.push(e.argv.join(' '))
     if (gh.value instanceof Error) throw gh.value
@@ -44,7 +46,7 @@ export function world(on: On, dirty = { value: false }, gh: { value?: string | E
     submitted.push(e.text)
     return { text: e.text }
   })
-  return { sent, targets, submitted, toasts, clock, ghCalls }
+  return { sent, targets, submitted, toasts, clock, ghCalls, sid }
 }
 
 export const BAND = {

@@ -1,6 +1,10 @@
-import type { Panel, Peer, Peers, PrState, Queue, Sent } from '../types'
+import type { Finished, Panel, Peer, Peers, PeerStatus, PrState, Queue, Sent } from '../types'
 
-export const FINAL = new Set(['done', 'already-done', 'blocked', 'dropped', 'answered', 'cancelled'])
+export const FINAL = new Set(['done', 'already-done', 'blocked', 'dropped', 'answered', 'cancelled', 'declined', 'expired', 'skipped'])
+// Final, but not a success: a task chained after one of these is not passed.
+const FAILED = new Set(['blocked', 'dropped', 'cancelled', 'declined', 'expired', 'skipped'])
+// Not yet sent: held for a session that is not running, or chained after another task.
+const UNSENT = new Set(['held', 'chained'])
 const PEER_LINE = /^\s+(\S+) \[(\w+)\]\s+·\s+([\w-]+)\s+·\s+([\w-]+)/gm
 // claude-mem's background summarisers: not sessions a person passes work to.
 export const DEFAULT_HIDDEN = /^observer-sessions-/
@@ -28,7 +32,7 @@ export function matchTarget(peers: Peers, agent: string): Target {
   return { error: `No session named ${agent}. Sessions: ${peers.list.map(p => p.name).join(', ') || 'none'}.` }
 }
 
-export type View = { peers: Peers; queue: Queue; sent: Sent[]; open: Panel | null; now: number }
+export type View = { peers: Peers; queue: Queue; sent: Sent[]; open: Panel | null; now: number; status: Record<string, PeerStatus> }
 /** `link` draws after the text; `taskId` gives a backlog row its move and drop buttons in the pane. */
 export type Row = { key: string; text: string; color?: string; isClear?: true; link?: { href: string; label: string }; taskId?: string }
 
@@ -44,7 +48,12 @@ export const ICONS: Record<string, string> = {
   blocked: '✗',
   dropped: '✗',
   cancelled: '✗',
+  declined: '✗',
+  expired: '✗',
+  skipped: '✗',
   waiting: '?',
+  held: '‖',
+  chained: '↪',
 }
 export const icon = (s: Sent) => (s.kind === 'ask' && s.status === 'sent' ? '?' : (ICONS[s.status] ?? '·'))
 
@@ -59,7 +68,7 @@ export function ago(ms: number): string {
 const lastWord = (s: Sent) => s.updatedAt ?? s.sentAt
 export const isQuiet = (s: Sent, now: number) => {
   const at = lastWord(s)
-  return !FINAL.has(s.status) && at !== undefined && now - at >= QUIET_MS
+  return !FINAL.has(s.status) && !UNSENT.has(s.status) && at !== undefined && now - at >= QUIET_MS
 }
 export const GITHUB_PR = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/
 // Followed until merged or closed.
@@ -124,7 +133,7 @@ export function badges(v: View): { panel: Panel; label: string }[] {
 }
 
 export function rowsFor(panel: Panel, v: View): Row[] {
-  const { peers, queue, sent, now } = v
+  const { peers, queue, sent, now, status } = v
   switch (panel) {
     case 'me':
       return [
@@ -135,7 +144,7 @@ export function rowsFor(panel: Panel, v: View): Row[] {
       return peers.list.length
         ? peers.list.map(p => ({
             key: p.ref,
-            text: `${p.state === 'busy' ? '●' : '○'} ${p.name}  ${p.state} · ${p.mode}`,
+            text: `${p.state === 'busy' ? '●' : '○'} ${p.name}  ${p.state} · ${p.mode}${statusText(status[p.name])}`,
             color: p.state === 'busy' ? 'yellow' : undefined,
           }))
         : [{ key: 'none', text: 'No other sessions.', color: 'gray' }]
@@ -185,4 +194,42 @@ function groupedRows(sent: Sent[], now: number): Row[] {
       ...members.flatMap(m => sentRows(m, now, '  ')),
     ]
   })
+}
+
+// What a peer running baton reported: branch, active task, backlog.
+const statusText = (s?: PeerStatus) =>
+  !s ? '' : `${s.branch ? ` · ${s.branch}` : ''}${s.active ? ` · ▶ #${s.active.id} ${s.active.task}` : ''}${s.backlog ? `  ≡ ${s.backlog}` : ''}`
+
+/** Whether a task chained after `after` (a task or fan-out group id) can go, must wait, or never will. */
+export function chainState(sent: Sent[], after: string): 'ready' | 'wait' | 'failed' {
+  const members = sent.filter(s => s.id === after || s.group === after)
+  if (!members.length || members.some(s => FAILED.has(s.status) || s.pr?.state === 'closed')) return 'failed'
+  const isIn = (s: Sent) =>
+    (s.status === 'done' || s.status === 'already-done') && (!s.prUrl || !GITHUB_PR.test(s.prUrl) || s.pr?.state === 'merged')
+  return members.every(isIn) ? 'ready' : 'wait'
+}
+
+/** A routing reply's first line, `<session>: <reason>`, matched to a listed session (a unique prefix counts). */
+export function parsePick(reply: string, names: string[]): { name: string; reason: string } | undefined {
+  const [, said = '', reason = ''] = /^\s*([\w.-]+)\s*[:-]\s*(.*)$/m.exec(reply) ?? []
+  const hits = names.filter(n => n === said || n.startsWith(said))
+  const [name] = hits
+  return name && said && hits.length === 1 ? { name, reason: reason.trim() || 'best match' } : undefined
+}
+
+/** `/baton log`: what was passed from here and received here within `windowMs`, newest last. */
+export function logText(sent: Sent[], finished: Finished[], now: number, windowMs: number, label: string): string {
+  const since = now - windowMs
+  const took = (from?: number, to?: number) => (from !== undefined && to !== undefined ? `  (${ago(to - from)})` : '')
+  const passed = sent
+    .filter(s => (s.updatedAt ?? s.sentAt ?? 0) >= since)
+    .map(s => `  ${icon(s)} #${s.id} → ${s.agent}  ${s.task}${s.prUrl ? `  ${s.prUrl}` : ''}${FINAL.has(s.status) ? took(s.sentAt, s.updatedAt) : `  (${s.status})`}`)
+  const received = finished
+    .filter(f => (f.finishedAt ?? 0) >= since)
+    .map(f => `  ${ICONS[f.status] ?? '·'} #${f.id} from ${f.fromLabel}  ${f.task}${f.prUrl ? `  ${f.prUrl}` : ''}${took(f.receivedAt, f.finishedAt)}`)
+  if (!passed.length && !received.length) return `Nothing passed or received ${label}.`
+  return [
+    ...(passed.length ? ['Passed from here', ...passed] : []),
+    ...(received.length ? ['Received here', ...received] : []),
+  ].join('\n')
 }

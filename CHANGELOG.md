@@ -2,6 +2,22 @@
 
 All notable changes to the baton plugin. Versions match `plugins/baton/.claude-plugin/plugin.json`.
 
+## 1.7.0 — 2026-10-05
+
+### Added
+- **Confirm tasks** option: Start, Queue or Decline each passed task or question; `declined` reaches the sender. (#25)
+- **Accept from** option: only take tasks and questions from matching sessions. (#26)
+- Questions are answered by a read-only subagent, so they never interrupt the receiver's own work. (#27)
+- Outbox: a task for a session that isn't running can be held (`‖ held`) and is sent when it appears, for up to a day. (#28)
+- Chains: `/pass <session> after #<id> <task>` passes it once the earlier task's PR merges. (#29)
+- `/pass auto <task>` picks the session, says why, and asks first. (#30)
+- The sessions panel shows each peer's branch, active task and backlog (BATON-STATUS). (#31)
+- `/baton log [today|week]`: what was passed and received, with PRs and durations. (#32)
+
+### Fixed
+- Two sessions in the same folder no longer share one queue. Lists are kept per session, and a session that stopped hands its queue to the next one in that folder. (#33)
+- baton's messages are only recognised at the start of a message, so a task whose text quotes `BATON-RESULT …` is still taken as a task.
+
 ## 1.6.0 — 2026-10-05
 
 ### Added

@@ -1,47 +1,31 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Panel, Queue, Sent, Task } from '../types'
-import { badges, DEFAULT_HIDDEN, FINAL, GITHUB_PR, ICONS, isFollowed, matchTarget, parsePeers, prState, rowsFor, TITLES } from './shared'
+import type { Finished, Panel, Queue, Sent, Task } from '../types'
+import { answererPrompt, askPrompt, continuePrompt, routePrompt, taskPrompt, waitingDetail } from './prompts'
+import { ANSWER_LINE, ASK_LINE, ASK_MARK, CANCEL_MARK, MARK, parse, parseCancel, parsePing, parseStatus } from './protocol'
+import { RESULT_LINE, STATUS_MARK, STATUS_PING, URL } from './protocol'
+import { badges, chainState, FINAL, GITHUB_PR, ICONS, isFollowed, logText, matchTarget } from './shared'
+import { parsePeers, parsePick, prState, rowsFor, TITLES } from './shared'
 import type { Row, Target, View } from './shared'
-import { askPrompt, continuePrompt, taskPrompt, waitingDetail } from './prompts'
+import { ANSWERER, COMMANDS, STATUSES, TOOLS } from './tools'
+import { clip, configFrom, label, mergeQueues, short } from './config'
+import { ANSWER_WAIT_MS, AUTO_PICK, HOLD_MS, LOG_WINDOWS, PANE, PANE_COLUMNS, PEERS_EVERY_MS, PING_EVERY_MS, PR_EVERY_MS, STALE_MS } from './config'
+import type { Config } from './config'
 
 const peersAtom = atom({ plugin: 'baton', key: 'peers' } as const, { me: '', list: [] })
 const queueAtom = atom({ plugin: 'baton', key: 'queue' } as const, { active: null, backlog: [] })
 const sentAtom = atom({ plugin: 'baton', key: 'sent' } as const, [])
 const openAtom = atom({ plugin: 'baton', key: 'open' } as const, null)
+const statusAtom = atom({ plugin: 'baton', key: 'status' } as const, {})
 
 type $ = EngineInterface
-/** PR follow-up for this load: whether its timer runs, and whether `gh` turned out to be missing. */
-type Poll = { isOn: boolean; isGhMissing: boolean }
-/** The person's options, read once per load. `warning` is a bad hidden_sessions pattern, toasted once. */
-type Config = { branchRule: string; hidden: RegExp; worktree: boolean; warning?: { text: string; isShown: boolean } }
+/**
+ * Per-load state: PR follow-up's timer and whether `gh` is missing, when peers were last
+ * pinged, and which answerer subagent owes which question its answer.
+ */
+type Live = { isPolling: boolean; isGhMissing: boolean; pingedAt: number; answering: Record<string, Task>; hasAnswerer: boolean }
 
-const MARK = 'BATON-PASS '
-const MARK_LINE = /BATON-PASS (\{.*\})/
-// A question: answered read-only, outside the task queue.
-const ASK_MARK = 'BATON-ASK '
-const ASK_LINE = /BATON-ASK (\{.*\})/
-// The sender takes back a queued task; only the session that passed it may.
-const CANCEL_MARK = 'BATON-CANCEL '
-const CANCEL_LINE = /BATON-CANCEL (\{.*\})/
-// The sender's answer to a receiver's ask_sender question.
-const ANSWER_LINE = /BATON-ANSWER (\w+): ([\s\S]+)/
-// Every report, from this mod or from a receiver's model without it, leads with this line.
-const RESULT_LINE = /BATON-RESULT (\w+): ([\w-]+)/
-const URL = /https?:\/\/\S+/
-const PEERS_EVERY_MS = 20_000
-const PR_EVERY_MS = 5 * 60_000
-const PANE = 'baton'
-const PANE_COLUMNS = 64
-const STATUSES = ['done', 'already-done', 'blocked'] as const
-// Used when the branch_rule option is unset. The repo's own instructions win when they name one.
-const DEFAULT_BRANCH_RULE =
-  'Branch off an up-to-date default branch as `<type>/<short-kebab-slug>`, type one of feat, fix, chore, refactor, perf, docs.'
-const AUTO_PICK = true
-
-const short = (s: string) => (s.length > 60 ? `${s.slice(0, 57)}...` : s)
-const label = (path: string) => path.split('/').filter(Boolean).pop() ?? path
 
 // Receives can overlap; serialise the store's read-modify-write so no task is lost.
 let lock: Promise<unknown> = Promise.resolve()
@@ -51,44 +35,112 @@ const serial = <T,>(fn: () => Promise<T>): Promise<T> => {
   return run
 }
 
-// The store keeps both lists past a restart; the atoms are what the band draws from.
-const storeKey = async ($: $, name: string) => `${name}:${await $.session.root()}`
+// ---------- store: one set of lists per session, adopted from sessions that stopped ----------
+
+const LISTS = ['queue', 'sent', 'asked', 'finished'] as const
+// Adoption runs once per session and load; concurrent callers share the run, and a failed one is retried.
+let adoptedFor = ''
+let adopting: { key: string; run: Promise<void> } | undefined
+
+async function adoptStale($: $) {
+  const [root, sid] = await Promise.all([$.session.root(), $.session.id()])
+  const key = `${root}:${sid}`
+  if (adoptedFor === key) return
+  if (adopting?.key !== key) {
+    const run = adoptNow($, root, sid).then(
+      () => void (adoptedFor = key),
+      () => void (adopting = undefined),
+    )
+    adopting = { key, run }
+  }
+  await adopting.run
+}
+
+async function adoptNow($: $, root: string, sid: string) {
+  const now = await $.clock.now()
+  const keys = await $.store.keys()
+  // Lists from before 1.7.0 were shared by the folder (no session part); they go to the first session that loads.
+  const owners = keys.some(k => LISTS.some(n => k === `${n}:${root}`)) ? [''] : []
+  for (const k of keys.filter(k => k.startsWith(`beat:${root}:`) && k !== `beat:${root}:${sid}`)) {
+    if (now - Number(await $.store.get(k)) >= STALE_MS) owners.push(k.slice(`beat:${root}:`.length))
+  }
+  for (const other of owners) {
+    for (const n of LISTS) {
+      const from = other ? `${n}:${root}:${other}` : `${n}:${root}`
+      const theirs = await $.store.get(from)
+      if (theirs === undefined) continue
+      // Delete before merging, so a second session finds nothing to take. Not atomic across
+      // processes: two sessions starting in the same instant may both copy the lists.
+      await $.store.delete(from)
+      const mine = await $.store.get(`${n}:${root}:${sid}`)
+      await $.store.set(`${n}:${root}:${sid}`, n === 'queue' ? mergeQueues(mine as Queue, theirs as Queue) : [...((mine as unknown[]) ?? []), ...(theirs as unknown[])])
+    }
+    if (other) await $.store.delete(`beat:${root}:${other}`)
+  }
+  await $.store.set(`beat:${root}:${sid}`, now)
+}
+
+const storeKey = async ($: $, name: string) => {
+  await adoptStale($)
+  return `${name}:${await $.session.root()}:${await $.session.id()}`
+}
+const beat = async ($: $) => $.store.set(`beat:${await $.session.root()}:${await $.session.id()}`, await $.clock.now())
 const load = async ($: $): Promise<Queue> =>
   ((await $.store.get(await storeKey($, 'queue'))) as Queue | undefined) ?? { active: null, backlog: [] }
 const save = async ($: $, q: Queue) => {
   await $.store.set(await storeKey($, 'queue'), q)
+  await beat($)
   await update($, queueAtom, () => q)
 }
 const loadSent = async ($: $): Promise<Sent[]> => ((await $.store.get(await storeKey($, 'sent'))) as Sent[] | undefined) ?? []
-// Questions this session still owes an answer to, so `answer` knows who asked.
-const loadAsked = async ($: $): Promise<Task[]> => ((await $.store.get(await storeKey($, 'asked'))) as Task[] | undefined) ?? []
-const saveAsked = async ($: $, list: Task[]) => $.store.set(await storeKey($, 'asked'), list.slice(-20))
-// Tasks this session finished or dropped, so /baton-report can still reach their senders.
-const loadFinished = async ($: $): Promise<Task[]> => ((await $.store.get(await storeKey($, 'finished'))) as Task[] | undefined) ?? []
-const addFinished = async ($: $, t: Task) =>
-  $.store.set(await storeKey($, 'finished'), [...(await loadFinished($)).filter(x => x.id !== t.id), t].slice(-20))
 const changeSent = ($: $, fn: (list: Sent[]) => Sent[]) =>
   serial(async () => {
     const list = fn(await loadSent($)).slice(-50)
     await $.store.set(await storeKey($, 'sent'), list)
     await update($, sentAtom, () => list)
   })
-
-export function parse(text: string, line = MARK_LINE): Task | undefined {
-  const raw = line.exec(text)?.[1]
-  if (!raw) return undefined
-  try {
-    const t = JSON.parse(raw) as Record<string, unknown>
-    const ok = ['id', 'task', 'from', 'fromLabel'].every(k => typeof t[k] === 'string' && t[k] !== '')
-    return ok ? { id: String(t.id), task: String(t.task), from: String(t.from), fromLabel: String(t.fromLabel) } : undefined
-  } catch {
-    return undefined
-  }
+const addSent = async ($: $, entry: Sent) => changeSent($, list => [...list, entry])
+/** Patches entry `id` only if its status is still `from`, in one serialised write: true when this call won it. */
+async function claim($: $, id: string, from: string, patch: Partial<Sent>): Promise<boolean> {
+  const won = { value: false }
+  await changeSent($, list =>
+    list.map(s => {
+      if (s.id !== id || s.status !== from) return s
+      won.value = true
+      return { ...s, ...patch }
+    }),
+  )
+  return won.value
 }
+const setSent = ($: $, id: string, patch: Partial<Sent>) => changeSent($, list => list.map(s => (s.id === id ? { ...s, ...patch } : s)))
+// Questions this session still owes an answer to, so `answer` knows who asked.
+const loadAsked = async ($: $): Promise<Task[]> => ((await $.store.get(await storeKey($, 'asked'))) as Task[] | undefined) ?? []
+const saveAsked = async ($: $, list: Task[]) => $.store.set(await storeKey($, 'asked'), list.slice(-20))
+// Tasks that left this session's queue: for /baton-report and /baton log.
+const loadFinished = async ($: $): Promise<Finished[]> =>
+  ((await $.store.get(await storeKey($, 'finished'))) as Finished[] | undefined) ?? []
+const addFinished = async ($: $, t: Task, status: string, prUrl?: string) => {
+  const entry: Finished = { ...t, status, finishedAt: await $.clock.now(), ...(prUrl ? { prUrl } : {}) }
+  await $.store.set(await storeKey($, 'finished'), [...(await loadFinished($)).filter(x => x.id !== t.id), entry].slice(-50))
+}
+
+// ---------- receiving: tasks and questions ----------
 
 const notify = async ($: $, t: Task, status: string, detail: string) => {
   const text = `BATON-RESULT ${t.id}: ${status}. [${label(await $.session.root())}] "${short(t.task)}" ${detail}`
   return $.session.send({ to: { sessionId: t.from }, text }).catch(err => $.ui.toast(`baton: cannot reach ${t.fromLabel}: ${err}`))
+}
+
+function showWarnings($: $, cfg: Config) {
+  for (const w of cfg.warnings.filter(w => !w.isShown)) {
+    w.isShown = true
+    $.ui.toast(w.text)
+  }
+}
+
+async function decline($: $, t: Task) {
+  $.ui.toast(`baton: declined #${t.id} from ${t.fromLabel} (not accepted here).`)
+  await notify($, t, 'declined', 'was not accepted here.')
 }
 
 async function busyReason($: $, q: Queue, cfg: Config): Promise<string | undefined> {
@@ -108,6 +160,67 @@ async function start($: $, t: Task, cfg: Config) {
   submitSoon($, t.id, taskPrompt(t, cfg.branchRule, worktree))
 }
 
+/** Starts the task, or backlogs it when this session is busy (or `isQueued`); tells the sender which. */
+async function takeTask($: $, task: Task, cfg: Config, isQueued = false) {
+  const outcome = await serial(async () => {
+    const q = await load($)
+    const why = isQueued ? 'the person here queued it' : await busyReason($, q, cfg)
+    if (why) {
+      await save($, { ...q, backlog: [...q.backlog, task] })
+      return { status: 'queued', detail: `is in the backlog at position ${q.backlog.length + 1} (${why}).` }
+    }
+    await save($, { ...q, active: task })
+    await start($, task, cfg)
+    return { status: 'started', detail: 'is now being worked on.' }
+  })
+  await notify($, task, outcome.status, outcome.detail)
+}
+
+async function confirmTask($: $, task: Task, cfg: Config) {
+  const choice = await $.ui
+    .ask(`Start #${task.id} from ${task.fromLabel}: "${short(task.task)}"?`, { options: ['Start', 'Queue', 'Decline'], header: 'baton' })
+    .catch(() => 'Queue')
+  if (choice === 'Decline') return void (await notify($, task, 'declined', 'was declined by the person here.'))
+  await takeTask($, task, cfg, choice !== 'Start')
+}
+
+/** A read-only subagent answers, so the main conversation is never interrupted; a prompt if it cannot run. */
+async function answerQuestion($: $, q: Task, live: Live) {
+  await serial(async () => saveAsked($, [...(await loadAsked($)).filter(x => x.id !== q.id), q]))
+  if (!live.hasAnswerer) live.hasAnswerer = await $.agent.register(ANSWERER).then(() => true, () => false)
+  const run = await $.agent
+    .spawn({ subagentType: `baton:${ANSWERER.name}`, prompt: answererPrompt(q), description: `Answer #${q.id}` })
+    .catch(() => undefined)
+  if (!run || run.deny !== undefined) return submitSoon($, q.id, askPrompt(q))
+  // It replies through the answer tool; its id, when core gives one, lets turn.complete catch a reply it never sent.
+  if (run.agentId) live.answering[run.agentId] = q
+  else void $.clock.after(ANSWER_WAIT_MS, () => void askAgain($, q))
+}
+
+// The answerer never replied: ask the main session instead.
+async function askAgain($: $, q: Task) {
+  if ((await loadAsked($)).some(x => x.id === q.id)) submitSoon($, q.id, askPrompt(q))
+}
+
+async function confirmQuestion($: $, q: Task, live: Live) {
+  const choice = await $.ui
+    .ask(`Answer question #${q.id} from ${q.fromLabel}: "${short(q.task)}"?`, { options: ['Answer', 'Decline'], header: 'baton' })
+    .catch(() => 'Decline')
+  if (choice === 'Answer') await answerQuestion($, q, live)
+  else await notify($, q, 'declined', 'was declined by the person here.')
+}
+
+async function finishAnswer($: $, id: string, answer: string): Promise<Task | undefined> {
+  const q = await serial(async () => {
+    const list = await loadAsked($)
+    const hit = list.find(x => x.id === id)
+    if (hit) await saveAsked($, list.filter(x => x.id !== id))
+    return hit
+  })
+  if (q) await notify($, q, 'answered', `\n${answer.trim() || '(no answer)'}`)
+  return q
+}
+
 /** Moves the next backlog task to active and starts it; answers what happened. */
 async function pickNext($: $, cfg: Config): Promise<string> {
   const picked = await serial(async () => {
@@ -124,6 +237,8 @@ async function pickNext($: $, cfg: Config): Promise<string> {
   await notify($, picked, 'started', 'is now being worked on.')
   return `Started #${picked.id} "${short(picked.task)}".`
 }
+
+// ---------- passing: send, hold, chain, route ----------
 
 // The counter keeps ids made in the same millisecond apart.
 let seq = 0
@@ -145,11 +260,21 @@ async function resolveTarget($: $, agent: string, cfg: Config): Promise<Target> 
   return peers.me || peers.list.length ? matchTarget(peers, agent) : { to: agent }
 }
 
+// The full prompt rides along, so a receiver without this mod still gets the whole workflow.
+const deliver = async ($: $, agent: string, t: Task, cfg: Config) =>
+  $.session.send({ to: agent, text: `${MARK}${JSON.stringify(t)}\n\n${taskPrompt(t, cfg.branchRule)}` })
+
 /** One name, or several comma-separated (a fan-out: one task each, grouped). Any bad name sends nothing. */
 async function pass($: $, typed: string, task: string, cfg: Config): Promise<string> {
+  const names = typed.split(',').map(n => n.trim()).filter(Boolean)
   const targets: Target[] = []
-  for (const name of typed.split(',').map(n => n.trim()).filter(Boolean)) targets.push(await resolveTarget($, name, cfg))
+  for (const name of names) targets.push(await resolveTarget($, name, cfg))
   const errors = targets.flatMap(t => ('error' in t ? [t.error] : []))
+  const [name] = names
+  const [error] = errors
+  // One unknown name with no near miss: the session may simply not be running yet.
+  if (name && error && names.length === 1 && error.startsWith('No session named') && !error.includes('Did you mean'))
+    return holdTask($, name, task, error)
   if (errors.length || !targets.length) return errors.join('\n') || 'Usage: /pass <agent>[,<agent>…] <task>'
   const agents = targets.flatMap(t => ('to' in t ? [t.to] : []))
   const [only] = agents
@@ -161,16 +286,80 @@ async function pass($: $, typed: string, task: string, cfg: Config): Promise<str
 }
 
 async function sendTask($: $, agent: string, task: string, cfg: Config, id: string, group?: string): Promise<string> {
-  const t = await newTask($, task, id)
-  const sent = await $.session.send({
-    to: agent,
-    // The full prompt rides along, so a receiver without this mod still gets the whole workflow.
-    text: `${MARK}${JSON.stringify(t)}\n\n${taskPrompt(t, cfg.branchRule)}`,
-  })
+  const sent = await deliver($, agent, await newTask($, task, id), cfg)
   if (!sent.isDelivered) return `Not delivered to ${agent}: ${sent.reason}`
   const now = await $.clock.now()
-  await changeSent($, list => [...list, { id: t.id, agent, task, status: 'sent', sentAt: now, updatedAt: now, ...(group ? { group } : {}) }])
-  return `Passed #${t.id} to ${agent}. It reports back here when it is queued, started and done.`
+  await addSent($, { id, agent, task, status: 'sent', sentAt: now, updatedAt: now, ...(group ? { group } : {}) })
+  return `Passed #${id} to ${agent}. It reports back here when it is queued, started and done.`
+}
+
+async function holdTask($: $, name: string, task: string, error: string): Promise<string> {
+  const choice = await $.ui
+    .ask(`${name} isn't running — hold it and send when it appears?`, { options: ['Hold', "Don't send"], header: 'baton' })
+    .catch(() => "Don't send")
+  if (choice !== 'Hold') return `Not sent. ${error}`
+  const id = newId()
+  const now = await $.clock.now()
+  await addSent($, { id, agent: name, task, status: 'held', sentAt: now, updatedAt: now })
+  return `Holding #${id} for ${name}. It is sent when ${name} shows up, for up to a day.`
+}
+
+// On each peer refresh: send held tasks whose session appeared, expire the ones a day old.
+async function deliverHeld($: $, cfg: Config) {
+  const [peers, now] = [await read($, peersAtom), await $.clock.now()]
+  for (const s of (await loadSent($)).filter(s => s.status === 'held')) {
+    if (now - (s.sentAt ?? now) >= HOLD_MS) {
+      if (await claim($, s.id, 'held', { status: 'expired', updatedAt: now }))
+        $.ui.toast(`baton: held task #${s.id} for ${s.agent} expired after a day.`)
+      continue
+    }
+    const target = matchTarget(peers, s.agent)
+    // Claimed first, so an overlapping refresh cannot send it too.
+    if (!('to' in target) || !(await claim($, s.id, 'held', { agent: target.to, status: 'sent', updatedAt: now }))) continue
+    const sent = await deliver($, target.to, await newTask($, s.task, s.id), cfg)
+    if (!sent.isDelivered) await setSent($, s.id, { agent: s.agent, status: 'held' })
+  }
+}
+
+async function chainTask($: $, typed: string, after: string, task: string, cfg: Config): Promise<string> {
+  if (!(await loadSent($)).some(s => s.id === after || s.group === after)) return `No task #${after} passed from here.`
+  const target = await resolveTarget($, typed, cfg)
+  if ('error' in target) return target.error
+  const id = newId()
+  const now = await $.clock.now()
+  await addSent($, { id, agent: target.to, task, status: 'chained', after, sentAt: now, updatedAt: now })
+  return `#${id} will be passed to ${target.to} once #${after} is done and its PR merges.`
+}
+
+// After any result or PR change: pass chained tasks whose earlier task is in, skip the ones it failed.
+async function releaseChains($: $, cfg: Config) {
+  const list = await loadSent($)
+  const now = await $.clock.now()
+  for (const c of list.filter(s => s.status === 'chained' && s.after)) {
+    const state = chainState(list, c.after ?? '')
+    if (state === 'wait') continue
+    if (state === 'failed') {
+      if (await claim($, c.id, 'chained', { status: 'skipped', updatedAt: now }))
+        $.ui.toast(`baton: #${c.id} was not passed: #${c.after} did not make it in.`)
+      continue
+    }
+    // Claimed first: a PR check and a result can release the same chain at once.
+    if (!(await claim($, c.id, 'chained', { status: 'sent', sentAt: now, updatedAt: now }))) continue
+    const sent = await deliver($, c.agent, await newTask($, c.task, c.id), cfg)
+    if (sent.isDelivered) $.ui.toast(`baton: #${c.after} is in; passed #${c.id} to ${c.agent}.`)
+    else await setSent($, c.id, { status: 'chained' })
+  }
+}
+
+async function autoRoute($: $, task: string, cfg: Config): Promise<string> {
+  await refreshPeers($, cfg)
+  const names = (await read($, peersAtom)).list.map(p => p.name)
+  if (!names.length) return 'No other sessions to pass to.'
+  const reply = await $.model.complete({ model: 'haiku', prompt: routePrompt(task, names), maxTokens: 80 }).catch(() => undefined)
+  const pick = reply?.isAnswered ? parsePick(reply.text, names) : undefined
+  if (!pick) return 'Could not pick a session for this task. Pass it by name.'
+  const choice = await $.ui.ask(`Pass it to ${pick.name}? (${pick.reason})`, { options: ['Send', 'Cancel'], header: 'baton' }).catch(() => 'Cancel')
+  return choice === 'Send' ? pass($, pick.name, task, cfg) : 'Not sent.'
 }
 
 async function ask($: $, typed: string, question: string, cfg: Config): Promise<string> {
@@ -181,21 +370,77 @@ async function ask($: $, typed: string, question: string, cfg: Config): Promise<
   const sent = await $.session.send({ to: agent, text: `${ASK_MARK}${JSON.stringify(t)}\n\n${askPrompt(t)}` })
   if (!sent.isDelivered) return `Not delivered to ${agent}: ${sent.reason}`
   const now = await $.clock.now()
-  await changeSent($, list => [...list, { id: t.id, agent, task: question, status: 'sent', kind: 'ask', sentAt: now, updatedAt: now }])
+  await addSent($, { id: t.id, agent, task: question, status: 'sent', kind: 'ask', sentAt: now, updatedAt: now })
   return `Asked ${agent} (#${t.id}). The answer comes back here.`
 }
 
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+// ---------- peers, status and PR follow-up ----------
+
+// ListAgents is the only listing of sessions; a mod reaches it as a tool call.
+async function refreshPeers($: EngineInterface, cfg: Config) {
+  showWarnings($, cfg)
+  await beat($)
+  // No listing (denied, errored or unavailable) leaves the last one standing.
+  const r = await $.tool.call({ tool: 'ListAgents' }).catch(() => undefined)
+  if (!r || r.deny !== undefined || r.isError) return
+  await update($, peersAtom, () => parsePeers(r.result.listing, cfg.hidden))
+  await deliverHeld($, cfg)
+}
+
+// Opening the sessions panel asks peers running baton what they are on, at most once a minute.
+async function pingPeers($: $, live: Live) {
+  const now = await $.clock.now()
+  if (now - live.pingedAt < PING_EVERY_MS) return
+  live.pingedAt = now
+  const from = await $.session.id()
+  for (const p of (await read($, peersAtom)).list)
+    await $.session.send({ to: p.name, text: `${STATUS_PING}${JSON.stringify({ from })}` }).catch(() => undefined)
+}
+
+async function answerPing($: $, from: string) {
+  const [q, peers, git] = await Promise.all([
+    load($),
+    read($, peersAtom),
+    $.process.run(['git', 'branch', '--show-current'], { cwd: await $.session.root() }).catch(() => undefined),
+  ])
+  const status = {
+    me: peers.me,
+    branch: git?.exitCode === 0 ? git.stdout.trim() : '',
+    active: q.active ? { id: q.active.id, task: short(q.active.task) } : null,
+    backlog: q.backlog.length,
+  }
+  await $.session.send({ to: { sessionId: from }, text: `${STATUS_MARK}${JSON.stringify(status)}` }).catch(() => undefined)
+}
+
+async function checkPrs($: $, cfg: Config, live: Live) {
+  if (live.isGhMissing) return
+  for (const s of (await loadSent($)).filter(isFollowed)) {
+    const r = await $.process.run(['gh', 'pr', 'view', s.prUrl ?? '', '--json', 'state,statusCheckRollup']).catch(() => undefined)
+    // gh is not installed or will not start: stop quietly for this load.
+    if (!r) return void (live.isGhMissing = true)
+    const pr = r.exitCode === 0 ? prState(r.stdout) : undefined
+    if (pr) await setSent($, s.id, { pr })
+  }
+  await releaseChains($, cfg)
+}
+
+function followPrs($: $, cfg: Config, live: Live) {
+  void checkPrs($, cfg, live)
+  if (live.isPolling) return
+  live.isPolling = true
+  $.clock.every(PR_EVERY_MS, () => void checkPrs($, cfg, live))
+}
 
 const snapshot = async ($: $): Promise<View> => {
-  const [peers, queue, sent, open, now] = await Promise.all([
+  const [peers, queue, sent, open, now, status] = await Promise.all([
     read($, peersAtom),
     read($, queueAtom),
     read($, sentAtom),
     read($, openAtom),
     $.clock.now(),
+    read($, statusAtom),
   ])
-  return { peers, queue, sent, open, now }
+  return { peers, queue, sent, open, now, status }
 }
 
 async function moveTask($: $, id: string, by: number) {
@@ -220,132 +465,84 @@ async function dropTask($: $, id: string) {
   if (dropped) await notify($, dropped, 'dropped', 'was removed from the backlog by the person here.')
 }
 
-const clearFinished = ($: $) => changeSent($, list => list.filter(s => !FINAL.has(s.status)))
+// Keeps finished tasks a pending chain still waits on.
+const clearFinished = ($: $) =>
+  changeSent($, list => {
+    const awaited = new Set(list.filter(s => s.status === 'chained').map(s => s.after))
+    return list.filter(s => !FINAL.has(s.status) || awaited.has(s.id) || (s.group !== undefined && awaited.has(s.group)))
+  })
 
-// ListAgents is the only listing of sessions; a mod reaches it as a tool call.
-async function refreshPeers($: EngineInterface, cfg: Config) {
-  if (cfg.warning && !cfg.warning.isShown) {
-    cfg.warning.isShown = true
-    $.ui.toast(cfg.warning.text)
-  }
-  // No listing (denied, errored or unavailable) leaves the last one standing.
-  const r = await $.tool.call({ tool: 'ListAgents' }).catch(() => undefined)
-  if (!r || r.deny !== undefined || r.isError) return
-  await update($, peersAtom, () => parsePeers(r.result.listing, cfg.hidden))
+// A BATON-RESULT for a task passed from here: update its row, toast what matters, follow its PR.
+async function onResult($: $, text: string, id: string, status: string, cfg: Config, live: Live) {
+  // An answer is the text after its first line; any URL in it is not a PR.
+  const answer = status === 'answered' ? clip(text.split('\n').slice(1).join(' ').trim(), 2000) : ''
+  const question = status === 'waiting' ? text.split('\n')[1]?.trim() : undefined
+  const prUrl = status === 'answered' || status === 'waiting' ? undefined : URL.exec(text)?.[0]
+  const ours = (await loadSent($)).find(s => s.id === id)
+  if (!ours) return
+  const now = await $.clock.now()
+  await setSent($, id, { status, updatedAt: now, ...(prUrl ? { prUrl } : {}), ...(answer ? { answer } : {}), ...(question ? { question } : {}) })
+  const extra = prUrl ?? question
+  if (FINAL.has(status) || status === 'waiting') $.ui.toast(`${ICONS[status] ?? '·'} ${ours.agent} ${status} #${id}${extra ? ` · ${extra}` : ''}`)
+  if (prUrl && GITHUB_PR.test(prUrl)) followPrs($, cfg, live)
+  await releaseChains($, cfg)
 }
 
-async function checkPrs($: $, poll: Poll) {
-  if (poll.isGhMissing) return
-  for (const s of (await loadSent($)).filter(isFollowed)) {
-    const r = await $.process.run(['gh', 'pr', 'view', s.prUrl ?? '', '--json', 'state,statusCheckRollup']).catch(() => undefined)
-    // gh is not installed or will not start: stop quietly for this load.
-    if (!r) return void (poll.isGhMissing = true)
-    const pr = r.exitCode === 0 ? prState(r.stdout) : undefined
-    if (pr) await changeSent($, list => list.map(x => (x.id === s.id ? { ...x, pr } : x)))
-  }
-}
-
-function followPrs($: $, poll: Poll) {
-  void checkPrs($, poll)
-  if (poll.isOn) return
-  poll.isOn = true
-  $.clock.every(PR_EVERY_MS, () => void checkPrs($, poll))
-}
-
-function parseCancel(text: string): { id: string; from: string } | undefined {
-  const raw = CANCEL_LINE.exec(text)?.[1]
-  if (!raw) return undefined
-  try {
-    const c = JSON.parse(raw) as Record<string, unknown>
-    return typeof c.id === 'string' && typeof c.from === 'string' ? { id: c.id, from: c.from } : undefined
-  } catch {
-    return undefined
-  }
-}
-
-function hiddenFrom(pattern: string): Pick<Config, 'hidden' | 'warning'> {
-  if (!pattern) return { hidden: DEFAULT_HIDDEN }
-  try {
-    return { hidden: new RegExp(pattern) }
-  } catch {
-    const text = `baton: hidden_sessions "${pattern}" is not a valid pattern; hiding ${DEFAULT_HIDDEN.source} instead.`
-    return { hidden: DEFAULT_HIDDEN, warning: { text, isShown: false } }
-  }
+async function openSessions($: $, cfg: Config, live: Live) {
+  await refreshPeers($, cfg)
+  await pingPeers($, live)
 }
 
 export const register: Register = (on, options) => {
-  const branchRule =
-    typeof options.branch_rule === 'string' && options.branch_rule.trim() ? options.branch_rule : DEFAULT_BRANCH_RULE
-  const pattern = typeof options.hidden_sessions === 'string' ? options.hidden_sessions.trim() : ''
-  const cfg: Config = { branchRule, worktree: options.worktree === true, ...hiddenFrom(pattern) }
-  const poll: Poll = { isOn: false, isGhMissing: false }
+  const cfg = configFrom(options)
+  const live: Live = { isPolling: false, isGhMissing: false, pingedAt: -Infinity, answering: {}, hasAnswerer: false }
+  const accepts = (t: Task) => !cfg.accept || cfg.accept.test(t.fromLabel)
 
   on('session.start', async ($, e, next) => {
-    await Promise.all([
-      $.command.register({ name: 'pass', description: 'Pass a task to another named session', argumentHint: '<agent> <task>', immediate: true }),
-      $.command.register({ name: 'ask', description: 'Ask another named session a question about its repo', argumentHint: '<agent> <question>', immediate: true }),
-      $.command.register({ name: 'baton', description: 'Show the task this session is working on and its backlog', immediate: true }),
-      $.command.register({ name: 'baton-next', description: 'Pick up the next passed task (force: drop the active one first)', argumentHint: '[force]' }),
-      $.command.register({ name: 'baton-report', description: 'Report the outcome of a task that already left this session', argumentHint: '<id> <done|already-done|blocked> [PR URL] [summary]', immediate: true }),
-      $.command.register({ name: 'baton-cancel', description: 'Take back a task you passed, if it is still queued', argumentHint: '<id>', immediate: true }),
-      $.command.register({ name: 'baton-answer', description: 'Answer the question a session asked about a task you passed', argumentHint: '<id> <answer>', immediate: true }),
-      $.tool.register({
-        name: 'pass',
-        description: 'Pass a task to another named Claude session (an agent as ListAgents lists it), or to several at once, comma-separated. It queues the task, takes it to a pull request and reports back.',
-        inputSchema: {
-          type: 'object',
-          properties: { agent: { type: 'string' }, task: { type: 'string', description: 'What to change, in full: the receiver has none of this context.' } },
-          required: ['agent', 'task'],
-        },
-      }),
-      $.tool.register({
-        name: 'ask',
-        description: 'Ask another named Claude session (an agent as ListAgents lists it) a question about its repo. It answers read-only, changing nothing, and the answer comes back here as a message.',
-        inputSchema: {
-          type: 'object',
-          properties: { agent: { type: 'string' }, question: { type: 'string', description: 'The question, in full: the receiver has none of this context.' } },
-          required: ['agent', 'question'],
-        },
-      }),
-      $.tool.register({
-        name: 'answer',
-        description: 'Send the answer to a question another session asked about this repo (a BATON-ASK).',
-        inputSchema: {
-          type: 'object',
-          properties: { id: { type: 'string' }, answer: { type: 'string' } },
-          required: ['id', 'answer'],
-        },
-      }),
-      $.tool.register({
-        name: 'ask_sender',
-        description: 'Ask the session that passed the active task a question you need answered to go on. Stop after calling it: the answer arrives as a message.',
-        inputSchema: { type: 'object', properties: { question: { type: 'string' } }, required: ['question'] },
-      }),
-      $.tool.register({
-        name: 'task_done',
-        description: 'Finish the passed task this session is working on: reports to the session that sent it and picks up the next queued task.',
-        inputSchema: {
-          type: 'object',
-          properties: { status: { enum: STATUSES }, summary: { type: 'string' }, prUrl: { type: 'string' } },
-          required: ['status', 'summary'],
-        },
-      }),
-    ])
+    await Promise.all([...COMMANDS.map(c => $.command.register(c)), ...TOOLS.map(t => $.tool.register(t))])
+    live.hasAnswerer = await $.agent.register(ANSWERER).then(
+      () => true,
+      err => ($.ui.log(`baton: answerer subagent unavailable: ${err}`, { to: 'debug' }), false),
+    )
     await save($, await load($))
     await changeSent($, list => list)
     void refreshPeers($, cfg)
     $.clock.every(PEERS_EVERY_MS, () => void refreshPeers($, cfg))
-    if ((await loadSent($)).some(isFollowed)) followPrs($, poll)
+    if ((await loadSent($)).some(isFollowed)) followPrs($, cfg, live)
+    return next(e)
+  })
+
+  // The answerer is baton's own: the model never delegates to it.
+  on('agent.offer', { agent: `baton:${ANSWERER.name}` }, () => ({ isOffered: false }))
+
+  on('turn.complete', async ($, e, next) => {
+    const q = e.agentId ? live.answering[e.agentId] : undefined
+    if (e.agentId && q) {
+      delete live.answering[e.agentId]
+      await finishAnswer($, q.id, e.answer)
+    }
     return next(e)
   })
 
   on('session.receive', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
+    showWarnings($, cfg)
+    const pingFrom = parsePing(e.text)
+    if (pingFrom) {
+      await answerPing($, pingFrom)
+      return { consumed: 'baton status ping' }
+    }
+    const status = parseStatus(e.text)
+    if (status) {
+      await update($, statusAtom, all => ({ ...all, [status.name]: status.status }))
+      return { consumed: `baton status from ${status.name}` }
+    }
     // Before results: a question's own text carries a BATON-RESULT line for receivers without this mod.
     const question = parse(e.text, ASK_LINE)
     if (question) {
-      await serial(async () => saveAsked($, [...(await loadAsked($)).filter(q => q.id !== question.id), question]))
-      submitSoon($, question.id, askPrompt(question))
+      if (!accepts(question)) await decline($, question)
+      else if (cfg.confirm) void $.clock.after(0, () => void confirmQuestion($, question, live))
+      else await answerQuestion($, question, live)
       return { consumed: `baton question #${question.id} received` }
     }
     const cancel = parseCancel(e.text)
@@ -371,40 +568,20 @@ export const register: Register = (on, options) => {
       await notify($, active, 'started', 'has the answer and is carrying on.')
       return { consumed: `baton answer for #${active.id}` }
     }
-    const [, id, status] = RESULT_LINE.exec(e.text) ?? []
-    if (id && status) {
-      // An answer is the text after its first line; any URL in it is not a PR.
-      const answer = status === 'answered' ? clip(e.text.split('\n').slice(1).join(' ').trim(), 2000) : ''
-      const question = status === 'waiting' ? e.text.split('\n')[1]?.trim() : undefined
-      const prUrl = status === 'answered' || status === 'waiting' ? undefined : URL.exec(e.text)?.[0]
-      const now = await $.clock.now()
-      const ours = (await loadSent($)).find(s => s.id === id)
-      await changeSent($, list =>
-        list.map(s =>
-          s.id === id ? { ...s, status, updatedAt: now, ...(prUrl ? { prUrl } : {}), ...(answer ? { answer } : {}), ...(question ? { question } : {}) } : s,
-        ),
-      )
-      const extra = prUrl ?? question
-      if (ours && (FINAL.has(status) || status === 'waiting'))
-        $.ui.toast(`${ICONS[status] ?? '·'} ${ours.agent} ${status} #${id}${extra ? ` · ${extra}` : ''}`)
-      if (ours && prUrl && GITHUB_PR.test(prUrl)) followPrs($, poll)
+    const [, id, result] = RESULT_LINE.exec(e.text) ?? []
+    if (id && result) {
+      await onResult($, e.text, id, result, cfg, live)
       return next(e)
     }
-    const task = parse(e.text)
-    if (!task) return next(e)
-    const outcome = await serial(async () => {
-      const q = await load($)
-      const why = await busyReason($, q, cfg)
-      if (why) {
-        await save($, { ...q, backlog: [...q.backlog, task] })
-        return { status: 'queued', detail: `is in the backlog at position ${q.backlog.length + 1} (${why}).` }
-      }
-      await save($, { ...q, active: task })
-      await start($, task, cfg)
-      return { status: 'started', detail: 'is now being worked on.' }
-    })
-    await notify($, task, outcome.status, outcome.detail)
-    return { consumed: `baton task #${task.id} ${outcome.status}` }
+    const parsed = parse(e.text)
+    if (!parsed) return next(e)
+    const task: Task = { ...parsed, receivedAt: await $.clock.now() }
+    if (!accepts(task)) await decline($, task)
+    else if (cfg.confirm) {
+      await notify($, task, 'queued', 'is waiting for the person here to confirm.')
+      void $.clock.after(0, () => void confirmTask($, task, cfg))
+    } else await takeTask($, task, cfg)
+    return { consumed: `baton task #${task.id} received` }
   })
 
   on('tool.call', { tool: /^mcp__baton__pass$/ }, async ($, e) => {
@@ -425,30 +602,23 @@ export const register: Register = (on, options) => {
     const { id, answer } = e as unknown as { id?: unknown; answer?: unknown }
     if (typeof id !== 'string' || typeof answer !== 'string' || !answer.trim())
       return { deny: 'answer needs the question id and a non-empty answer.' }
-    const q = await serial(async () => {
-      const list = await loadAsked($)
-      const hit = list.find(x => x.id === id)
-      if (hit) await saveAsked($, list.filter(x => x.id !== id))
-      return hit
-    })
-    if (!q) return { deny: `No open question #${id} in this session.` }
-    await notify($, q, 'answered', `\n${answer.trim()}`)
-    return { result: `Answered #${id} for ${q.fromLabel}.` }
+    const q = await finishAnswer($, id, answer)
+    return q ? { result: `Answered #${id} for ${q.fromLabel}.` } : { deny: `No open question #${id} in this session.` }
   })
 
   on('tool.call', { tool: /^mcp__baton__task_done$/ }, async ($, e) => {
     const { status, summary, prUrl } = e as unknown as { status?: unknown; summary?: unknown; prUrl?: unknown }
     if (!STATUSES.includes(status as never) || typeof summary !== 'string')
       return { deny: `task_done needs status (${STATUSES.join(', ')}) and summary.` }
+    const url = typeof prUrl === 'string' && prUrl ? prUrl : undefined
     const done = await serial(async () => {
       const q = await load($)
       if (q.active) await save($, { ...q, active: null })
-      if (q.active) await addFinished($, q.active)
+      if (q.active) await addFinished($, q.active, String(status), url)
       return q.active
     })
     if (!done) return { deny: 'No passed task is active in this session.' }
-    const pr = typeof prUrl === 'string' && prUrl ? `\nPR: ${prUrl}` : ''
-    await notify($, done, String(status), `\n${summary}${pr}`)
+    await notify($, done, String(status), `\n${summary}${url ? `\nPR: ${url}` : ''}`)
     const after = AUTO_PICK ? await pickNext($, cfg) : 'Run /baton-next to pick up the next one.'
     return { result: `Reported #${done.id} to ${done.fromLabel}. ${after}` }
   })
@@ -480,6 +650,11 @@ export const register: Register = (on, options) => {
     if (!id) return { text: 'Usage: /baton-cancel <id>' }
     const s = (await loadSent($)).find(x => x.id === id && !FINAL.has(x.status))
     if (!s) return { text: `No open task #${id} passed from here.` }
+    // Not sent yet: nothing to ask the receiver.
+    if (s.status === 'held' || s.status === 'chained') {
+      await setSent($, id, { status: 'cancelled', updatedAt: await $.clock.now() })
+      return { text: `Cancelled #${id}; it was never sent.` }
+    }
     const sent = await $.session.send({ to: s.agent, text: `${CANCEL_MARK}${JSON.stringify({ id, from: await $.session.id() })}` })
     if (!sent.isDelivered) return { text: `Not delivered to ${s.agent}: ${sent.reason}` }
     return { text: `Asked ${s.agent} to cancel #${id}. It replies "cancelled" if the task was still queued.` }
@@ -497,10 +672,13 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'pass' }, async ($, e) => {
-    const [agent = '', ...rest] = e.args.trim().split(/\s+/)
+    const args = e.args.trim()
+    const chained = /^(\S+)\s+after\s+#(\w+)\s+([\s\S]+)$/.exec(args)
+    if (chained) return { text: await chainTask($, chained[1] ?? '', chained[2] ?? '', chained[3] ?? '', cfg) }
+    const [agent = '', ...rest] = args.split(/\s+/)
     const task = rest.join(' ')
     if (!agent || !task) return { text: 'Usage: /pass <agent> <task>' }
-    return { text: await pass($, agent, task, cfg) }
+    return { text: agent === 'auto' ? await autoRoute($, task, cfg) : await pass($, agent, task, cfg) }
   })
 
   on('command.run', { command: 'ask' }, async ($, e) => {
@@ -510,7 +688,12 @@ export const register: Register = (on, options) => {
     return { text: await ask($, agent, question, cfg) }
   })
 
-  on('command.run', { command: 'baton' }, async $ => {
+  on('command.run', { command: 'baton' }, async ($, e) => {
+    const [sub, span = 'today'] = e.args.trim().split(/\s+/)
+    if (sub === 'log') {
+      const windowMs = LOG_WINDOWS[span] ?? LOG_WINDOWS.today ?? 0
+      return { text: logText(await loadSent($), await loadFinished($), await $.clock.now(), windowMs, span in LOG_WINDOWS ? span : 'today') }
+    }
     const q = await load($)
     const lines = [
       q.active ? `Active: #${q.active.id} from ${q.active.fromLabel}: ${q.active.task}` : 'Active: none',
@@ -524,7 +707,7 @@ export const register: Register = (on, options) => {
     const dropped = await serial(async () => {
       const q = await load($)
       if (q.active && isForce) await save($, { ...q, active: null })
-      if (q.active && isForce) await addFinished($, q.active)
+      if (q.active && isForce) await addFinished($, q.active, 'dropped')
       return q.active
     })
     if (dropped && !isForce) return { text: `#${dropped.id} is still active. Let it finish (task_done), or run /baton-next force to drop it.` }
@@ -540,7 +723,7 @@ export const register: Register = (on, options) => {
     const docks = e.viewport?.isFullscreen === true
     const width = Math.max(20, e.props.bodyColumns - 4)
     const press = (p: Panel) => async () => {
-      if (p === 'sessions') void refreshPeers($, cfg)
+      if (p === 'sessions') void openSessions($, cfg, live)
       if (!docks) return void (await update($, openAtom, o => (o === p ? null : p)))
       await update($, openAtom, () => p)
       await $.ui.open({ id: PANE, title: 'Baton', columns: PANE_COLUMNS })
@@ -576,7 +759,7 @@ export const register: Register = (on, options) => {
     const { Box, Button, Link, Text } = $.ui.resolve(e)
     const panel = v.open ?? 'tasks'
     const pick = (p: Panel) => async () => {
-      if (p === 'sessions') void refreshPeers($, cfg)
+      if (p === 'sessions') void openSessions($, cfg, live)
       await update($, openAtom, () => p)
     }
 
