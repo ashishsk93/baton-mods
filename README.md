@@ -6,7 +6,7 @@
 
 One session per repo. When work belongs somewhere else, hand it off and keep going.
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue)](plugins/baton/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue)](plugins/baton/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757)](https://claude.com/claude-code)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -81,7 +81,25 @@ A band above the prompt shows where everything stands. Press a badge to expand i
 | `◎ 3 (1 busy)` | Other sessions, and how many are busy (claude-mem's observer sessions are hidden) |
 | `▶ 1` | Tasks this session is working on |
 | `≡ 2` | Tasks queued here |
-| `→ 1/4` | Tasks you passed on: open / total |
+| `→ 1/4` | Tasks you passed on: open / total, plus `(1 quiet)` when one has had no word for 2 hours |
+
+Each task you passed on shows its state, how long since you last heard, and a clickable PR link once there is one:
+
+```
+✓ #k3x9p2 → api-server-7f  done 5m  add rate limiting to /login  PR #42
+▶ #m1q8r4 → web-app-3f  started 12m  fix the dark mode toggle
+○ #p7w2c1 → infra-a9  sent · no word in 3h  raise worker memory to 4 GB
+```
+
+| Icon | State |
+| --- | --- |
+| `○` / `?` | Sent (a task / a question), no reply yet |
+| `≡` | Queued behind other work |
+| `▶` | Being worked on |
+| `✓` | Done, already in place, or answered |
+| `✗` | Blocked or dropped |
+
+A toast tells you as soon as a task finishes or gets stuck, so you don't have to watch the band. In the side panel, each queued task here has `↑` `↓` `✕` buttons to reorder the backlog or drop a task. Dropping one tells the sender.
 
 ## 🚀 Install
 

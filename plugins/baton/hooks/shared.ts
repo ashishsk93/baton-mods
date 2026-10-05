@@ -13,8 +13,41 @@ export function parsePeers(listing: string): Peers {
   return { me, list }
 }
 
-export type View = { peers: Peers; queue: Queue; sent: Sent[]; open: Panel | null }
-export type Row = { key: string; text: string; color?: string; isClear?: true }
+export type View = { peers: Peers; queue: Queue; sent: Sent[]; open: Panel | null; now: number }
+/** `link` draws after the text; `taskId` gives a backlog row its move and drop buttons in the pane. */
+export type Row = { key: string; text: string; color?: string; isClear?: true; link?: { href: string; label: string }; taskId?: string }
+
+// A passed task with no word for this long is marked quiet.
+export const QUIET_MS = 2 * 60 * 60_000
+export const ICONS: Record<string, string> = {
+  sent: '○',
+  queued: '≡',
+  started: '▶',
+  done: '✓',
+  'already-done': '✓',
+  answered: '✓',
+  blocked: '✗',
+  dropped: '✗',
+}
+export const icon = (s: Sent) => (s.kind === 'ask' && s.status === 'sent' ? '?' : (ICONS[s.status] ?? '·'))
+
+export function ago(ms: number): string {
+  const m = Math.floor(ms / 60_000)
+  if (m < 1) return 'now'
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`
+}
+
+const lastWord = (s: Sent) => s.updatedAt ?? s.sentAt
+export const isQuiet = (s: Sent, now: number) => {
+  const at = lastWord(s)
+  return !FINAL.has(s.status) && at !== undefined && now - at >= QUIET_MS
+}
+const prLabel = (url: string) => {
+  const n = /\/pull(?:-requests)?\/(\d+)/.exec(url)?.[1]
+  return n ? `PR #${n}` : 'PR'
+}
 
 export const TITLES: Record<Panel, string> = {
   me: 'This session',
@@ -27,16 +60,17 @@ export const TITLES: Record<Panel, string> = {
 export function badges(v: View): { panel: Panel; label: string }[] {
   const busy = v.peers.list.filter(p => p.state === 'busy').length
   const pending = v.sent.filter(s => !FINAL.has(s.status)).length
+  const quiet = v.sent.filter(s => isQuiet(s, v.now)).length
   return [
     { panel: 'me', label: `◆ ${v.peers.me.split(' ')[0] || '…'}` },
     { panel: 'sessions', label: `◎ ${v.peers.list.length}${busy ? ` (${busy} busy)` : ''}` },
     { panel: 'tasks', label: `▶ ${v.queue.active ? 1 : 0} ≡ ${v.queue.backlog.length}` },
-    { panel: 'sent', label: `→ ${pending}/${v.sent.length}` },
+    { panel: 'sent', label: `→ ${pending}/${v.sent.length}${quiet ? ` (${quiet} quiet)` : ''}` },
   ]
 }
 
 export function rowsFor(panel: Panel, v: View): Row[] {
-  const { peers, queue, sent } = v
+  const { peers, queue, sent, now } = v
   switch (panel) {
     case 'me':
       return [
@@ -56,20 +90,26 @@ export function rowsFor(panel: Panel, v: View): Row[] {
         queue.active
           ? { key: 'active', text: `▶ #${queue.active.id} from ${queue.active.fromLabel}: ${queue.active.task}`, color: 'green' }
           : { key: 'active', text: '▶ nothing active', color: 'gray' },
-        ...queue.backlog.map((t, i) => ({ key: t.id, text: `${i + 1}. #${t.id} from ${t.fromLabel}: ${t.task}` })),
+        ...queue.backlog.map((t, i) => ({ key: t.id, text: `${i + 1}. #${t.id} from ${t.fromLabel}: ${t.task}`, taskId: t.id })),
         ...(queue.backlog.length ? [] : [{ key: 'empty', text: '≡ backlog empty', color: 'gray' }]),
       ]
     case 'sent':
       return [
         ...(sent.length ? [] : [{ key: 'none', text: 'Nothing passed on yet.', color: 'gray' }]),
-        ...sent.flatMap(s => [
-          {
-            key: s.id,
-            text: `${s.kind === 'ask' ? '? ' : ''}#${s.id} → ${s.agent}  ${s.status}  ${s.task}${s.prUrl ? `  ${s.prUrl}` : ''}`,
-            color: s.status === 'blocked' ? 'red' : FINAL.has(s.status) ? 'green' : 'yellow',
-          },
-          ...(s.answer ? [{ key: `${s.id}-answer`, text: `  ↳ ${s.answer}`, color: 'gray' }] : []),
-        ]),
+        ...sent.flatMap(s => {
+          const at = lastWord(s)
+          const quiet = isQuiet(s, now)
+          const age = at === undefined ? '' : quiet ? ` · no word in ${ago(now - at)}` : ` ${ago(now - at)}`
+          return [
+            {
+              key: s.id,
+              text: `${icon(s)} #${s.id} → ${s.agent}  ${s.status}${age}  ${s.task}`,
+              color: quiet ? 'gray' : s.status === 'blocked' ? 'red' : FINAL.has(s.status) ? 'green' : 'yellow',
+              ...(s.prUrl ? { link: { href: s.prUrl, label: prLabel(s.prUrl) } } : {}),
+            },
+            ...(s.answer ? [{ key: `${s.id}-answer`, text: `  ↳ ${s.answer}`, color: 'gray' }] : []),
+          ]
+        }),
         ...(sent.some(s => FINAL.has(s.status)) ? [{ key: 'clear', text: 'clear finished', isClear: true as const }] : []),
       ]
   }
