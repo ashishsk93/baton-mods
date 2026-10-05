@@ -1,0 +1,12 @@
+{
+  "name": "baton-mods",
+  "description": "Claude Code mods for passing work between sessions",
+  "owner": { "name": "Ashish S Kumar" },
+  "plugins": [
+    {
+      "name": "baton",
+      "source": "./plugins/baton",
+      "description": "Pass tasks between your Claude Code sessions: the receiver queues them, works each to a pull request, reports back and picks up the next."
+    }
+  ]
+}
