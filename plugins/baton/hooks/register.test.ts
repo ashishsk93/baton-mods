@@ -2,13 +2,14 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
-import { parsePeers } from './shared'
+import { matchTarget, parsePeers } from './shared'
 
 const passed = (id: string, task: string) =>
   `BATON-PASS ${JSON.stringify({ id, task, from: 'sender-session', fromLabel: 'launchpad' })}\n\nTask from launchpad: ${task}`
 
 function world(on: On, dirty = { value: false }) {
   const sent: string[] = []
+  const targets: unknown[] = []
   const submitted: string[] = []
   mock.store(on)
   const clock = mock.clock(on)
@@ -31,6 +32,7 @@ function world(on: On, dirty = { value: false }) {
   }))
   on('session.send', (_$, e) => {
     sent.push(e.text)
+    targets.push(e.to)
     return { isDelivered: true }
   })
   on('session.receive', (_$, e) => ({ text: e.text }))
@@ -38,7 +40,7 @@ function world(on: On, dirty = { value: false }) {
     submitted.push(e.text)
     return { text: e.text }
   })
-  return { sent, submitted, toasts, clock }
+  return { sent, targets, submitted, toasts, clock }
 }
 
 test('starts a task, backlogs the next, reports done and picks up the backlog', async ($, on) => {
@@ -279,4 +281,60 @@ test('backlog rows in the pane move up, down and drop', async ($, on) => {
   await pane.press({ key: 'drop-c3' })
   expect(await order()).toEqual(['#b2', '#a1'])
   expect(w.sent.some(t => t.startsWith('BATON-RESULT c3: dropped'))).toBe(true)
+})
+
+const PEERS = `This session is web-app-3f [aa11bb] — the name other sessions use to message it.
+
+Peer sessions (4):
+  api-server-7f [1a2b3c]  ·  interactive  ·  busy  ·  started 9m ago
+  api-gateway-2c [4d5e6f]  ·  interactive  ·  idle  ·  started 2m ago
+  infra-a9 [7a8b9c]  ·  interactive  ·  idle  ·  started 1h ago
+  observer-sessions-35 [07c6f3]  ·  interactive  ·  busy  ·  started 4m ago`
+
+const listAgents = (on: On, listing = PEERS) => on('tool.call', { tool: 'ListAgents' } as never, () => ({ result: { listing } }) as never)
+
+test('a custom hidden_sessions pattern replaces the default', () => {
+  expect(parsePeers(PEERS, /^api-/).list.map(p => p.name)).toEqual(['infra-a9', 'observer-sessions-35'])
+  expect(parsePeers(PEERS).list.map(p => p.name)).toEqual(['api-server-7f', 'api-gateway-2c', 'infra-a9'])
+})
+
+test('the hidden_sessions option filters the band', { options: { hidden_sessions: '^(api-|observer-)' } }, async ($, on) => {
+  world(on)
+  listAgents(on)
+  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  await ui.press({ key: 'sessions' })
+  expect((await ui.find({ key: 'sessions' }))?.text).toBe('◎ 1')
+})
+
+test('an invalid hidden_sessions pattern falls back to the default and says so once', { options: { hidden_sessions: '(' } }, async ($, on) => {
+  const w = world(on)
+  listAgents(on)
+  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  await ui.press({ key: 'sessions' })
+  await ui.press({ key: 'sessions' })
+  expect((await ui.find({ key: 'sessions' }))?.text).toBe('◎ 3 (1 busy)')
+  expect(w.toasts.filter(t => t.includes('hidden_sessions'))).toHaveLength(1)
+})
+
+test('matchTarget resolves a unique prefix, suggests on a near miss and refuses this session', () => {
+  const peers = parsePeers(PEERS)
+  expect(matchTarget(peers, 'api-server-7f')).toEqual({ to: 'api-server-7f' })
+  expect(matchTarget(peers, 'api-server-7f [1a2b3c]')).toEqual({ to: 'api-server-7f [1a2b3c]' })
+  expect(matchTarget(peers, 'infra')).toEqual({ to: 'infra-a9' })
+  expect(matchTarget(peers, 'api')).toEqual({ error: 'No session named api. Did you mean api-server-7f, api-gateway-2c?' })
+  expect(matchTarget(peers, 'billing')).toEqual({ error: 'No session named billing. Sessions: api-server-7f, api-gateway-2c, infra-a9.' })
+  expect(matchTarget(peers, 'web-app-3f')).toEqual({ error: 'web-app-3f is this session. Pass it to another one.' })
+  expect(matchTarget(peers, 'web-app-3f [aa11bb]')).toEqual({ error: 'web-app-3f [aa11bb] is this session. Pass it to another one.' })
+})
+
+test('/pass and /ask check the name against ListAgents before sending', async ($, on) => {
+  const w = world(on)
+  listAgents(on)
+  expect((await $.command.run({ command: 'pass', args: 'api fix it' } as never)).text).toContain('Did you mean api-server-7f, api-gateway-2c?')
+  expect((await $.command.run({ command: 'pass', args: 'web-app-3f fix it' } as never)).text).toContain('is this session')
+  expect((await $.command.run({ command: 'ask', args: 'billing why?' } as never)).text).toContain('No session named billing')
+  expect(w.sent).toEqual([])
+  expect((await $.command.run({ command: 'pass', args: 'infra raise memory' } as never)).text).toContain('to infra-a9')
+  expect((await $.command.run({ command: 'ask', args: 'api-server where is auth?' } as never)).text).toContain('Asked api-server-7f')
+  expect(w.targets).toEqual(['infra-a9', 'api-server-7f'])
 })

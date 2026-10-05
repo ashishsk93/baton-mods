@@ -2,8 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Panel, Queue, Sent, Task } from '../types'
-import { badges, FINAL, ICONS, parsePeers, rowsFor, TITLES } from './shared'
-import type { Row, View } from './shared'
+import { badges, DEFAULT_HIDDEN, FINAL, ICONS, matchTarget, parsePeers, rowsFor, TITLES } from './shared'
+import type { Row, Target, View } from './shared'
 
 const peersAtom = atom({ plugin: 'baton', key: 'peers' } as const, { me: '', list: [] })
 const queueAtom = atom({ plugin: 'baton', key: 'queue' } as const, { active: null, backlog: [] })
@@ -11,6 +11,8 @@ const sentAtom = atom({ plugin: 'baton', key: 'sent' } as const, [])
 const openAtom = atom({ plugin: 'baton', key: 'open' } as const, null)
 
 type $ = EngineInterface
+/** The person's options, read once per load. `warning` is a bad hidden_sessions pattern, toasted once. */
+type Config = { branchRule: string; hidden: RegExp; warning?: { text: string; isShown: boolean } }
 
 const MARK = 'BATON-PASS '
 const MARK_LINE = /BATON-PASS (\{.*\})/
@@ -112,10 +114,10 @@ async function busyReason($: $, q: Queue): Promise<string | undefined> {
 // engine runs the prompt once this session is idle.
 const submitSoon = ($: $, id: string, text: string) =>
   void $.clock.after(0, () => void $.prompt.submit({ text }).catch(err => $.ui.toast(`baton: could not start #${id}: ${err}`)))
-const start = ($: $, t: Task, branchRule: string) => submitSoon($, t.id, taskPrompt(t, branchRule))
+const start = ($: $, t: Task, cfg: Config) => submitSoon($, t.id, taskPrompt(t, cfg.branchRule))
 
 /** Moves the next backlog task to active and starts it; answers what happened. */
-async function pickNext($: $, branchRule: string): Promise<string> {
+async function pickNext($: $, cfg: Config): Promise<string> {
   const picked = await serial(async () => {
     const q = await load($)
     const [next, ...rest] = q.backlog
@@ -126,7 +128,7 @@ async function pickNext($: $, branchRule: string): Promise<string> {
     return next
   })
   if (typeof picked === 'string') return picked
-  start($, picked, branchRule)
+  start($, picked, cfg)
   await notify($, picked, 'started', 'is now being worked on.')
   return `Started #${picked.id} "${short(picked.task)}".`
 }
@@ -138,12 +140,24 @@ const newTask = async ($: $, task: string): Promise<Task> => ({
   fromLabel: label(await $.session.root()),
 })
 
-async function pass($: $, agent: string, task: string, branchRule: string): Promise<string> {
+// The cached list first; on a miss, a fresh ListAgents. With no listing at all, send as typed.
+async function resolveTarget($: $, agent: string, cfg: Config): Promise<Target> {
+  const first = matchTarget(await read($, peersAtom), agent)
+  if ('to' in first) return first
+  await refreshPeers($, cfg)
+  const peers = await read($, peersAtom)
+  return peers.me || peers.list.length ? matchTarget(peers, agent) : { to: agent }
+}
+
+async function pass($: $, typed: string, task: string, cfg: Config): Promise<string> {
+  const target = await resolveTarget($, typed, cfg)
+  if ('error' in target) return target.error
+  const agent = target.to
   const t = await newTask($, task)
   const sent = await $.session.send({
     to: agent,
     // The full prompt rides along, so a receiver without this mod still gets the whole workflow.
-    text: `${MARK}${JSON.stringify(t)}\n\n${taskPrompt(t, branchRule)}`,
+    text: `${MARK}${JSON.stringify(t)}\n\n${taskPrompt(t, cfg.branchRule)}`,
   })
   if (!sent.isDelivered) return `Not delivered to ${agent}: ${sent.reason}`
   const now = await $.clock.now()
@@ -151,7 +165,10 @@ async function pass($: $, agent: string, task: string, branchRule: string): Prom
   return `Passed #${t.id} to ${agent}. It reports back here when it is queued, started and done.`
 }
 
-async function ask($: $, agent: string, question: string): Promise<string> {
+async function ask($: $, typed: string, question: string, cfg: Config): Promise<string> {
+  const target = await resolveTarget($, typed, cfg)
+  if ('error' in target) return target.error
+  const agent = target.to
   const t = await newTask($, question)
   const sent = await $.session.send({ to: agent, text: `${ASK_MARK}${JSON.stringify(t)}\n\n${askPrompt(t)}` })
   if (!sent.isDelivered) return `Not delivered to ${agent}: ${sent.reason}`
@@ -198,15 +215,32 @@ async function dropTask($: $, id: string) {
 const clearFinished = ($: $) => changeSent($, list => list.filter(s => !FINAL.has(s.status)))
 
 // ListAgents is the only listing of sessions; a mod reaches it as a tool call.
-async function refreshPeers($: EngineInterface) {
-  const r = await $.tool.call({ tool: 'ListAgents' })
-  if (r.deny !== undefined || r.isError) return
-  await update($, peersAtom, () => parsePeers(r.result.listing))
+async function refreshPeers($: EngineInterface, cfg: Config) {
+  if (cfg.warning && !cfg.warning.isShown) {
+    cfg.warning.isShown = true
+    $.ui.toast(cfg.warning.text)
+  }
+  // No listing (denied, errored or unavailable) leaves the last one standing.
+  const r = await $.tool.call({ tool: 'ListAgents' }).catch(() => undefined)
+  if (!r || r.deny !== undefined || r.isError) return
+  await update($, peersAtom, () => parsePeers(r.result.listing, cfg.hidden))
+}
+
+function hiddenFrom(pattern: string): Pick<Config, 'hidden' | 'warning'> {
+  if (!pattern) return { hidden: DEFAULT_HIDDEN }
+  try {
+    return { hidden: new RegExp(pattern) }
+  } catch {
+    const text = `baton: hidden_sessions "${pattern}" is not a valid pattern; hiding ${DEFAULT_HIDDEN.source} instead.`
+    return { hidden: DEFAULT_HIDDEN, warning: { text, isShown: false } }
+  }
 }
 
 export const register: Register = (on, options) => {
   const branchRule =
     typeof options.branch_rule === 'string' && options.branch_rule.trim() ? options.branch_rule : DEFAULT_BRANCH_RULE
+  const pattern = typeof options.hidden_sessions === 'string' ? options.hidden_sessions.trim() : ''
+  const cfg: Config = { branchRule, ...hiddenFrom(pattern) }
 
   on('session.start', async ($, e, next) => {
     await Promise.all([
@@ -253,8 +287,8 @@ export const register: Register = (on, options) => {
     ])
     await save($, await load($))
     await changeSent($, list => list)
-    void refreshPeers($)
-    $.clock.every(PEERS_EVERY_MS, () => void refreshPeers($))
+    void refreshPeers($, cfg)
+    $.clock.every(PEERS_EVERY_MS, () => void refreshPeers($, cfg))
     return next(e)
   })
 
@@ -292,7 +326,7 @@ export const register: Register = (on, options) => {
         return { status: 'queued', detail: `is in the backlog at position ${q.backlog.length + 1} (${why}).` }
       }
       await save($, { ...q, active: task })
-      start($, task, branchRule)
+      start($, task, cfg)
       return { status: 'started', detail: 'is now being worked on.' }
     })
     await notify($, task, outcome.status, outcome.detail)
@@ -303,14 +337,14 @@ export const register: Register = (on, options) => {
     const { agent, task } = e as unknown as { agent?: unknown; task?: unknown }
     if (typeof agent !== 'string' || typeof task !== 'string' || !agent.trim() || !task.trim())
       return { deny: 'pass needs a non-empty agent and task.' }
-    return { result: await pass($, agent.trim(), task.trim(), branchRule) }
+    return { result: await pass($, agent.trim(), task.trim(), cfg) }
   })
 
   on('tool.call', { tool: /^mcp__baton__ask$/ }, async ($, e) => {
     const { agent, question } = e as unknown as { agent?: unknown; question?: unknown }
     if (typeof agent !== 'string' || typeof question !== 'string' || !agent.trim() || !question.trim())
       return { deny: 'ask needs a non-empty agent and question.' }
-    return { result: await ask($, agent.trim(), question.trim()) }
+    return { result: await ask($, agent.trim(), question.trim(), cfg) }
   })
 
   on('tool.call', { tool: /^mcp__baton__answer$/ }, async ($, e) => {
@@ -340,7 +374,7 @@ export const register: Register = (on, options) => {
     if (!done) return { deny: 'No passed task is active in this session.' }
     const pr = typeof prUrl === 'string' && prUrl ? `\nPR: ${prUrl}` : ''
     await notify($, done, String(status), `\n${summary}${pr}`)
-    const after = AUTO_PICK ? await pickNext($, branchRule) : 'Run /baton-next to pick up the next one.'
+    const after = AUTO_PICK ? await pickNext($, cfg) : 'Run /baton-next to pick up the next one.'
     return { result: `Reported #${done.id} to ${done.fromLabel}. ${after}` }
   })
 
@@ -348,14 +382,14 @@ export const register: Register = (on, options) => {
     const [agent = '', ...rest] = e.args.trim().split(/\s+/)
     const task = rest.join(' ')
     if (!agent || !task) return { text: 'Usage: /pass <agent> <task>' }
-    return { text: await pass($, agent, task, branchRule) }
+    return { text: await pass($, agent, task, cfg) }
   })
 
   on('command.run', { command: 'ask' }, async ($, e) => {
     const [agent = '', ...rest] = e.args.trim().split(/\s+/)
     const question = rest.join(' ')
     if (!agent || !question) return { text: 'Usage: /ask <agent> <question>' }
-    return { text: await ask($, agent, question) }
+    return { text: await ask($, agent, question, cfg) }
   })
 
   on('command.run', { command: 'baton' }, async $ => {
@@ -376,7 +410,7 @@ export const register: Register = (on, options) => {
     })
     if (dropped && !isForce) return { text: `#${dropped.id} is still active. Let it finish (task_done), or run /baton-next force to drop it.` }
     if (dropped) await notify($, dropped, 'dropped', 'was dropped by the person here.')
-    return { text: await pickNext($, branchRule) }
+    return { text: await pickNext($, cfg) }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -387,7 +421,7 @@ export const register: Register = (on, options) => {
     const docks = e.viewport?.isFullscreen === true
     const width = Math.max(20, e.props.bodyColumns - 4)
     const press = (p: Panel) => async () => {
-      if (p === 'sessions') void refreshPeers($)
+      if (p === 'sessions') void refreshPeers($, cfg)
       if (!docks) return void (await update($, openAtom, o => (o === p ? null : p)))
       await update($, openAtom, () => p)
       await $.ui.open({ id: PANE, title: 'Baton', columns: PANE_COLUMNS })
@@ -423,7 +457,7 @@ export const register: Register = (on, options) => {
     const { Box, Button, Link, Text } = $.ui.resolve(e)
     const panel = v.open ?? 'tasks'
     const pick = (p: Panel) => async () => {
-      if (p === 'sessions') void refreshPeers($)
+      if (p === 'sessions') void refreshPeers($, cfg)
       await update($, openAtom, () => p)
     }
 

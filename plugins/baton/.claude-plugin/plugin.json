@@ -1,6 +1,6 @@
 {
   "name": "baton",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Pass tasks between named Claude Code sessions: the receiver queues them, works each to a pull request, reports back and picks up the next. A band and panel show your sessions and tasks.",
   "author": {
     "name": "Ashish S Kumar"
@@ -12,6 +12,12 @@
       "title": "Branch rule",
       "description": "How the receiving session names the branch for a passed task. A repo's own instructions win when they name one.",
       "default": "Branch off an up-to-date default branch as `<type>/<short-kebab-slug>`, type one of feat, fix, chore, refactor, perf, docs."
+    },
+    "hidden_sessions": {
+      "type": "string",
+      "title": "Hidden sessions",
+      "description": "A regular expression. Sessions whose names match it are left out of the band and cannot be passed to. Default hides claude-mem's observer sessions.",
+      "default": "^observer-sessions-"
     }
   }
 }

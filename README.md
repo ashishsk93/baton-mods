@@ -6,7 +6,7 @@
 
 One session per repo. When work belongs somewhere else, hand it off and keep going.
 
-[![Version](https://img.shields.io/badge/version-1.3.0-blue)](plugins/baton/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.4.0-blue)](plugins/baton/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757)](https://claude.com/claude-code)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -121,9 +121,16 @@ Needs Claude Code **v2.1.287** or later. Install it on every machine whose sessi
 
 ## ⚙️ Configure
 
-Set your branch naming rule in `/config` (**baton → Branch rule**). A repo's own instructions win when they name one.
+In `/config` → **baton**:
 
-Default:
+| Option | What it does |
+| --- | --- |
+| **Branch rule** | How the receiving session names the branch. A repo's own instructions win when they name one. |
+| **Hidden sessions** | A regular expression. Sessions whose names match are left out of the band and can't be passed to. The default, `^observer-sessions-`, hides claude-mem's background sessions. |
+
+Session names don't need their suffix: `/pass infra …` goes to `infra-a9` when it's the only match. If a name is ambiguous or unknown, baton lists the near matches and sends nothing. It also refuses to pass a task to the session you're in.
+
+The default branch rule:
 
 > Branch off an up-to-date default branch as `<type>/<short-kebab-slug>`, type one of feat, fix, chore, refactor, perf, docs.
 
