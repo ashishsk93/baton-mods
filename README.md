@@ -11,6 +11,10 @@ One session per repo. When work belongs somewhere else, hand it off and keep goi
 [![plugin checks](https://github.com/ashishsk93/baton-mods/actions/workflows/plugin-checks.yml/badge.svg)](https://github.com/ashishsk93/baton-mods/actions/workflows/plugin-checks.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+<br><br>
+
+<img src="docs/demo.gif" alt="baton in a Claude Code terminal: /pass a task, the band and toast as it comes back with a PR, /ask a question, and a fan-out to three sessions" width="880">
+
 </div>
 
 ```
