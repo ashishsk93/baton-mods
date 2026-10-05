@@ -47,3 +47,20 @@ export const continuePrompt = (t: Task, answer: string) =>
     '',
     `Carry on with task #${t.id} from where you stopped, through the same steps, and finish with the task_done tool.`,
   ].join('\n')
+
+/** What the read-only answerer subagent is handed: the question and who asked. */
+export const answererPrompt = (t: Task) =>
+  [`Question #${t.id} from ${t.fromLabel}, about this repo:`, '', t.task, '', `Answer with the answer tool, id "${t.id}".`].join('\n')
+
+/** Routing for `/pass auto`: pick the session that owns the task, one line back. */
+export const routePrompt = (task: string, sessions: string[]) =>
+  [
+    'Pick the Claude Code session that should do this task. Each session works in one repo, and its name starts with that repo.',
+    '',
+    `Task: ${task}`,
+    '',
+    'Sessions:',
+    ...sessions.map(s => `- ${s}`),
+    '',
+    'Reply with one line only: <session name>: <why, in under ten words>',
+  ].join('\n')

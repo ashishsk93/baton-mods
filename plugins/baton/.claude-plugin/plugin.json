@@ -1,6 +1,6 @@
 {
   "name": "baton",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Pass tasks between named Claude Code sessions: the receiver queues them, works each to a pull request, reports back and picks up the next. A band and panel show your sessions and tasks.",
   "author": {
     "name": "Ashish S Kumar"
@@ -24,6 +24,18 @@
       "title": "Worktree",
       "description": "Work each passed task in a git worktree of its own, so uncommitted changes in this checkout no longer hold tasks in the queue.",
       "default": false
+    },
+    "confirm_tasks": {
+      "type": "boolean",
+      "title": "Confirm tasks",
+      "description": "Ask before starting a passed task or answering a question: Start, Queue or Decline.",
+      "default": false
+    },
+    "accept_from": {
+      "type": "string",
+      "title": "Accept from",
+      "description": "A regular expression. Only tasks and questions from sessions whose repo name matches are taken; others are declined. Empty accepts every session.",
+      "default": ""
     }
   }
 }
