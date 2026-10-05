@@ -1,0 +1,28 @@
+name: plugin checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Claude Code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - run: claude --version
+
+      - name: Validate marketplace
+        run: claude plugin validate --strict .
+
+      - name: Validate plugin
+        run: claude plugin validate --strict plugins/baton
+
+      - name: Test plugin
+        run: claude plugin test plugins/baton
