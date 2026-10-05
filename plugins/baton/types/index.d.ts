@@ -1,5 +1,6 @@
 /** `receivedAt`: epoch ms the task reached this session (absent before 1.7.0). */
-export type Task = { id: string; task: string; from: string; fromLabel: string; receivedAt?: number }
+/** `fromName`: the sender's session name, sent by baton 1.7.1 and later. */
+export type Task = { id: string; task: string; from: string; fromLabel: string; fromName?: string; receivedAt?: number }
 export type Queue = { active: Task | null; backlog: Task[] }
 /** A task that left this session's queue: how it ended, and when. */
 export type Finished = Task & { status: string; finishedAt?: number; prUrl?: string }

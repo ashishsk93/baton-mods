@@ -1,7 +1,7 @@
 import type { PeerStatus, Task } from '../types'
 
 // The messages sessions exchange. Each leads with a mark a receiver without this mod can still read.
-// Every pattern is anchored to the start of the message: a task's own text may quote any of them.
+// Every pattern is anchored to the start of the body `fromFirstMark` cuts out: a task's own text may quote any of them.
 export const MARK = 'BATON-PASS '
 const MARK_LINE = /^\s*BATON-PASS (\{.*\})/
 // A question: answered read-only, outside the task queue.
@@ -20,6 +20,11 @@ const STATUS_PING_LINE = /^\s*BATON-STATUS\? (\{.*\})/
 export const STATUS_MARK = 'BATON-STATUS '
 const STATUS_LINE = /^\s*BATON-STATUS (\{.*\})/
 export const URL = /https?:\/\/\S+/
+// baton's own results end with this line, naming the session that sent them: proof the sender runs baton.
+const FOOTER_LINE = /\n— baton · (\S+)\s*$/
+export const footer = (name: string) => (name ? `\n— baton · ${name}` : '')
+export const senderOf = (text: string) => FOOTER_LINE.exec(text)?.[1]
+export const withoutFooter = (text: string) => text.replace(FOOTER_LINE, '')
 
 const json = (line: RegExp, text: string): Record<string, unknown> | undefined => {
   const raw = line.exec(text)?.[1]
@@ -37,7 +42,9 @@ export function parse(text: string, line = MARK_LINE): Task | undefined {
   const t = json(line, text)
   if (!t) return undefined
   const ok = ['id', 'task', 'from', 'fromLabel'].every(k => typeof t[k] === 'string' && t[k] !== '')
-  return ok ? { id: String(t.id), task: String(t.task), from: String(t.from), fromLabel: String(t.fromLabel) } : undefined
+  if (!ok) return undefined
+  const fromName = str(t.fromName)
+  return { id: String(t.id), task: String(t.task), from: String(t.from), fromLabel: String(t.fromLabel), ...(fromName ? { fromName } : {}) }
 }
 
 export function parseCancel(text: string): { id: string; from: string } | undefined {
@@ -47,7 +54,12 @@ export function parseCancel(text: string): { id: string; from: string } | undefi
   return id && from ? { id, from } : undefined
 }
 
-export const parsePing = (text: string): string | undefined => str(json(STATUS_PING_LINE, text)?.from)
+export function parsePing(text: string): { from: string; fromName?: string } | undefined {
+  const p = json(STATUS_PING_LINE, text)
+  const from = str(p?.from)
+  const fromName = str(p?.fromName)
+  return from ? { from, ...(fromName ? { fromName } : {}) } : undefined
+}
 
 /** A peer's status reply, keyed by its session name (without the `[ref]`). */
 export function parseStatus(text: string): { name: string; status: PeerStatus } | undefined {
@@ -68,4 +80,14 @@ export function patternOption(option: unknown, name: string, fallback: string): 
   } catch {
     return { warning: `baton: ${name} "${pattern}" is not a valid pattern; ${fallback} instead.` }
   }
+}
+
+const ANY_MARK = /BATON-(?:PASS|ASK|CANCEL|ANSWER|RESULT|STATUS)\b/
+/**
+ * The message from its first baton mark on, without a closing envelope tag: whatever a session wraps a
+ * delivery in (`<cross-session-message …>`), the mark that leads decides what the message is.
+ */
+export function fromFirstMark(text: string): string | undefined {
+  const at = text.search(ANY_MARK)
+  return at < 0 ? undefined : text.slice(at).replace(/\s*<\/[\w-]+>\s*$/, '')
 }

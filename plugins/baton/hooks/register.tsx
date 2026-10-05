@@ -3,7 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Finished, Panel, Queue, Sent, Task } from '../types'
 import { answererPrompt, askPrompt, continuePrompt, routePrompt, taskPrompt, waitingDetail } from './prompts'
-import { ANSWER_LINE, ASK_LINE, ASK_MARK, CANCEL_MARK, MARK, parse, parseCancel, parsePing, parseStatus } from './protocol'
+import { ANSWER_LINE, ASK_LINE, ASK_MARK, CANCEL_MARK, footer, MARK, parse, parseCancel, parsePing, parseStatus } from './protocol'
+import { fromFirstMark, senderOf, withoutFooter } from './protocol'
 import { RESULT_LINE, STATUS_MARK, STATUS_PING, URL } from './protocol'
 import { badges, chainState, FINAL, GITHUB_PR, ICONS, isFollowed, logText, matchTarget } from './shared'
 import { parsePeers, parsePick, prState, rowsFor, TITLES } from './shared'
@@ -37,7 +38,7 @@ const serial = <T,>(fn: () => Promise<T>): Promise<T> => {
 
 // ---------- store: one set of lists per session, adopted from sessions that stopped ----------
 
-const LISTS = ['queue', 'sent', 'asked', 'finished'] as const
+const LISTS = ['queue', 'sent', 'asked', 'finished', 'known'] as const
 // Adoption runs once per session and load; concurrent callers share the run, and a failed one is retried.
 let adoptedFor = ''
 let adopting: { key: string; run: Promise<void> } | undefined
@@ -113,6 +114,13 @@ async function claim($: $, id: string, from: string, patch: Partial<Sent>): Prom
   return won.value
 }
 const setSent = ($: $, id: string, patch: Partial<Sent>) => changeSent($, list => list.map(s => (s.id === id ? { ...s, ...patch } : s)))
+// Sessions known to run baton: the only ones the sessions panel pings.
+const loadKnown = async ($: $): Promise<string[]> => ((await $.store.get(await storeKey($, 'known'))) as string[] | undefined) ?? []
+async function addKnown($: $, name: string | undefined) {
+  const known = await loadKnown($)
+  if (name && !known.includes(name)) await $.store.set(await storeKey($, 'known'), [...known, name].slice(-50))
+}
+const myName = async ($: $) => (await read($, peersAtom)).me.split(' ')[0] ?? ''
 // Questions this session still owes an answer to, so `answer` knows who asked.
 const loadAsked = async ($: $): Promise<Task[]> => ((await $.store.get(await storeKey($, 'asked'))) as Task[] | undefined) ?? []
 const saveAsked = async ($: $, list: Task[]) => $.store.set(await storeKey($, 'asked'), list.slice(-20))
@@ -127,7 +135,7 @@ const addFinished = async ($: $, t: Task, status: string, prUrl?: string) => {
 // ---------- receiving: tasks and questions ----------
 
 const notify = async ($: $, t: Task, status: string, detail: string) => {
-  const text = `BATON-RESULT ${t.id}: ${status}. [${label(await $.session.root())}] "${short(t.task)}" ${detail}`
+  const text = `BATON-RESULT ${t.id}: ${status}. [${label(await $.session.root())}] "${short(t.task)}" ${detail}${footer(await myName($))}`
   return $.session.send({ to: { sessionId: t.from }, text }).catch(err => $.ui.toast(`baton: cannot reach ${t.fromLabel}: ${err}`))
 }
 
@@ -244,12 +252,10 @@ async function pickNext($: $, cfg: Config): Promise<string> {
 let seq = 0
 const newId = () => (Date.now() + seq++).toString(36).slice(-6)
 
-const newTask = async ($: $, task: string, id = newId()): Promise<Task> => ({
-  id,
-  task,
-  from: await $.session.id(),
-  fromLabel: label(await $.session.root()),
-})
+const newTask = async ($: $, task: string, id = newId()): Promise<Task> => {
+  const fromName = await myName($)
+  return { id, task, from: await $.session.id(), fromLabel: label(await $.session.root()), ...(fromName ? { fromName } : {}) }
+}
 
 // The cached list first; on a miss, a fresh ListAgents. With no listing at all, send as typed.
 async function resolveTarget($: $, agent: string, cfg: Config): Promise<Target> {
@@ -389,12 +395,13 @@ async function refreshPeers($: EngineInterface, cfg: Config) {
 
 // Opening the sessions panel asks peers running baton what they are on, at most once a minute.
 async function pingPeers($: $, live: Live) {
-  const now = await $.clock.now()
-  if (now - live.pingedAt < PING_EVERY_MS) return
+  const [now, from, fromName, known] = await Promise.all([$.clock.now(), $.session.id(), myName($), loadKnown($)])
+  // A session without baton would read the ping as a message and answer it: ping only known ones.
+  const targets = (await read($, peersAtom)).list.filter(p => known.includes(p.name))
+  if (!targets.length || now - live.pingedAt < PING_EVERY_MS) return
   live.pingedAt = now
-  const from = await $.session.id()
-  for (const p of (await read($, peersAtom)).list)
-    await $.session.send({ to: p.name, text: `${STATUS_PING}${JSON.stringify({ from })}` }).catch(() => undefined)
+  for (const p of targets)
+    await $.session.send({ to: p.name, text: `${STATUS_PING}${JSON.stringify({ from, ...(fromName ? { fromName } : {}) })}` }).catch(() => undefined)
 }
 
 async function answerPing($: $, from: string) {
@@ -403,12 +410,8 @@ async function answerPing($: $, from: string) {
     read($, peersAtom),
     $.process.run(['git', 'branch', '--show-current'], { cwd: await $.session.root() }).catch(() => undefined),
   ])
-  const status = {
-    me: peers.me,
-    branch: git?.exitCode === 0 ? git.stdout.trim() : '',
-    active: q.active ? { id: q.active.id, task: short(q.active.task) } : null,
-    backlog: q.backlog.length,
-  }
+  const branch = git?.exitCode === 0 ? git.stdout.trim() : ''
+  const status = { me: peers.me, branch, active: q.active ? { id: q.active.id, task: short(q.active.task) } : null, backlog: q.backlog.length }
   await $.session.send({ to: { sessionId: from }, text: `${STATUS_MARK}${JSON.stringify(status)}` }).catch(() => undefined)
 }
 
@@ -432,15 +435,8 @@ function followPrs($: $, cfg: Config, live: Live) {
 }
 
 const snapshot = async ($: $): Promise<View> => {
-  const [peers, queue, sent, open, now, status] = await Promise.all([
-    read($, peersAtom),
-    read($, queueAtom),
-    read($, sentAtom),
-    read($, openAtom),
-    $.clock.now(),
-    read($, statusAtom),
-  ])
-  return { peers, queue, sent, open, now, status }
+  const [peers, queue, sent, open, status] = await Promise.all([read($, peersAtom), read($, queueAtom), read($, sentAtom), read($, openAtom), read($, statusAtom)])
+  return { peers, queue, sent, open, status, now: await $.clock.now() }
 }
 
 async function moveTask($: $, id: string, by: number) {
@@ -448,8 +444,7 @@ async function moveTask($: $, id: string, by: number) {
     const q = await load($)
     const i = q.backlog.findIndex(t => t.id === id)
     const j = i + by
-    const a = q.backlog[i]
-    const b = q.backlog[j]
+    const [a, b] = [q.backlog[i], q.backlog[j]]
     if (i < 0 || !a || !b) return
     await save($, { ...q, backlog: q.backlog.map((t, k) => (k === i ? b : k === j ? a : t)) })
   })
@@ -473,7 +468,9 @@ const clearFinished = ($: $) =>
   })
 
 // A BATON-RESULT for a task passed from here: update its row, toast what matters, follow its PR.
-async function onResult($: $, text: string, id: string, status: string, cfg: Config, live: Live) {
+async function onResult($: $, signed: string, id: string, status: string, cfg: Config, live: Live) {
+  await addKnown($, senderOf(signed))
+  const text = withoutFooter(signed)
   // An answer is the text after its first line; any URL in it is not a PR.
   const answer = status === 'answered' ? clip(text.split('\n').slice(1).join(' ').trim(), 2000) : ''
   const question = status === 'waiting' ? text.split('\n')[1]?.trim() : undefined
@@ -525,27 +522,31 @@ export const register: Register = (on, options) => {
   })
 
   on('session.receive', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
+    const body = e.agentId === undefined ? fromFirstMark(e.text) : undefined
+    if (!body) return next(e) // for a subagent, or not baton's
     showWarnings($, cfg)
-    const pingFrom = parsePing(e.text)
-    if (pingFrom) {
-      await answerPing($, pingFrom)
+    const ping = parsePing(body)
+    if (ping) {
+      await addKnown($, ping.fromName)
+      await answerPing($, ping.from)
       return { consumed: 'baton status ping' }
     }
-    const status = parseStatus(e.text)
+    const status = parseStatus(body)
     if (status) {
+      await addKnown($, status.name)
       await update($, statusAtom, all => ({ ...all, [status.name]: status.status }))
       return { consumed: `baton status from ${status.name}` }
     }
     // Before results: a question's own text carries a BATON-RESULT line for receivers without this mod.
-    const question = parse(e.text, ASK_LINE)
+    const question = parse(body, ASK_LINE)
     if (question) {
+      await addKnown($, question.fromName)
       if (!accepts(question)) await decline($, question)
       else if (cfg.confirm) void $.clock.after(0, () => void confirmQuestion($, question, live))
       else await answerQuestion($, question, live)
       return { consumed: `baton question #${question.id} received` }
     }
-    const cancel = parseCancel(e.text)
+    const cancel = parseCancel(body)
     if (cancel) {
       const hit = await serial(async () => {
         const q = await load($)
@@ -561,21 +562,22 @@ export const register: Register = (on, options) => {
       }
       return { consumed: `baton cancel #${cancel.id}` }
     }
-    const [, answerId, answerText] = ANSWER_LINE.exec(e.text) ?? []
+    const [, answerId, answerText] = ANSWER_LINE.exec(body) ?? []
     const active = answerId ? (await load($)).active : null
     if (active && answerText && active.id === answerId) {
       submitSoon($, active.id, continuePrompt(active, answerText.trim()))
       await notify($, active, 'started', 'has the answer and is carrying on.')
       return { consumed: `baton answer for #${active.id}` }
     }
-    const [, id, result] = RESULT_LINE.exec(e.text) ?? []
+    const [, id, result] = RESULT_LINE.exec(body) ?? []
     if (id && result) {
-      await onResult($, e.text, id, result, cfg, live)
+      await onResult($, body, id, result, cfg, live)
       return next(e)
     }
-    const parsed = parse(e.text)
+    const parsed = parse(body)
     if (!parsed) return next(e)
     const task: Task = { ...parsed, receivedAt: await $.clock.now() }
+    await addKnown($, task.fromName)
     if (!accepts(task)) await decline($, task)
     else if (cfg.confirm) {
       await notify($, task, 'queued', 'is waiting for the person here to confirm.')
