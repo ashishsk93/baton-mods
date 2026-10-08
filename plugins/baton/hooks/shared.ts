@@ -119,6 +119,18 @@ export const TITLES: Record<Panel, string> = {
   sent: 'Tasks passed on',
 }
 
+/** Each panel's colour: its badge marker in the hint line and its title in the pane. */
+export const ACCENT: Record<Panel, string> = { me: '#ff6ec7', sessions: '#5ad1ff', tasks: '#7dff8a', sent: '#ffd166' }
+
+// The pane's banner: one 5x5 block letter per colour, sunset to sea.
+export const LOGO: { rows: string[]; color: string }[] = [
+  { color: '#ff5f87', rows: ['████ ', '█   █', '████ ', '█   █', '████ '] },
+  { color: '#ff9f43', rows: [' ███ ', '█   █', '█████', '█   █', '█   █'] },
+  { color: '#ffd93d', rows: ['█████', '  █  ', '  █  ', '  █  ', '  █  '] },
+  { color: '#6bffb8', rows: [' ███ ', '█   █', '█   █', '█   █', ' ███ '] },
+  { color: '#5ad1ff', rows: ['█   █', '██  █', '█ █ █', '█  ██', '█   █'] },
+]
+
 // Glyphs from blocks every monospace font carries, so the terminal and the font agree on width.
 export function badges(v: View): { panel: Panel; label: string }[] {
   const busy = v.peers.list.filter(p => p.state === 'busy').length

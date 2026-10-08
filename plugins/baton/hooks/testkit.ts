@@ -50,8 +50,9 @@ export function world(on: On, dirty = { value: false }, gh: { value?: string | E
 }
 
 export const BAND = {
-  component: 'AbovePrompt',
-  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100 },
+  component: 'PromptHint',
+  props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+  viewport: { columns: 104, rows: 40, isFullscreen: false },
 } as const
 
 export const PEERS = `This session is web-app-3f [aa11bb] — the name other sessions use to message it.

@@ -6,8 +6,8 @@ import { answererPrompt, askPrompt, continuePrompt, routePrompt, taskPrompt, wai
 import { ANSWER_LINE, ASK_LINE, ASK_MARK, CANCEL_MARK, footer, MARK, parse, parseCancel, parsePing, parseStatus } from './protocol'
 import { fromFirstMark, senderOf, withoutFooter } from './protocol'
 import { RESULT_LINE, STATUS_MARK, STATUS_PING, URL } from './protocol'
-import { badges, chainState, FINAL, GITHUB_PR, ICONS, isFollowed, logText, matchTarget } from './shared'
-import { parsePeers, parsePick, prState, rowsFor, TITLES } from './shared'
+import { ACCENT, badges, chainState, FINAL, GITHUB_PR, ICONS, isFollowed, logText, matchTarget } from './shared'
+import { LOGO, parsePeers, parsePick, prState, rowsFor, TITLES } from './shared'
 import type { Row, Target, View } from './shared'
 import { ANSWERER, COMMANDS, STATUSES, TOOLS } from './tools'
 import { clip, configFrom, label, mergeQueues, short } from './config'
@@ -717,13 +717,13 @@ export const register: Register = (on, options) => {
     return { text: await pickNext($, cfg) }
   })
 
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
+  // The line under the prompt, left to right: the badges, then the engine's own hint, dim.
+  on('ui.render', { component: 'PromptHint' }, async ($, e) => {
     const v = await snapshot($)
     const { Box, Button, Link, Text } = $.ui.resolve(e)
-    // Fullscreen docks a pane beside the transcript: details go there, not under the band.
+    // Fullscreen docks a pane beside the transcript: details go there, not under the hint.
     const docks = e.viewport?.isFullscreen === true
-    const width = Math.max(20, e.props.bodyColumns - 4)
+    const width = Math.max(20, (e.viewport?.columns ?? 80) - 4)
     const press = (p: Panel) => async () => {
       if (p === 'sessions') void openSessions($, cfg, live)
       if (!docks) return void (await update($, openAtom, o => (o === p ? null : p)))
@@ -741,17 +741,19 @@ export const register: Register = (on, options) => {
       )
 
     return (
-      <Box flexDirection="column" width={e.props.bodyColumns}>
-        <Box columnGap={2} justifyContent="flex-end">
+      <Box flexDirection="column">
+        <Box columnGap={2}>
           {badges(v).map(b => (
-            <Button key={b.panel} plain label={b.label} onPress={press(b.panel)} />
+            <Box key={`badge-${b.panel}`}>
+              <Text color={ACCENT[b.panel]}>▌</Text>
+              <Button key={b.panel} plain dimColor={!!v.open && v.open !== b.panel} label={b.label} onPress={press(b.panel)} />
+            </Box>
           ))}
+          <Text dimColor wrap="truncate-end">
+            {e.props.tail ? `${e.props.hint} ${e.props.tail}` : e.props.hint}
+          </Text>
         </Box>
-        {!docks && v.open && (
-          <Box flexDirection="column" alignItems="flex-end">
-            {rowsFor(v.open, v).map(draw)}
-          </Box>
-        )}
+        {!docks && v.open && <Box flexDirection="column">{rowsFor(v.open, v).map(draw)}</Box>}
       </Box>
     )
   })
@@ -765,14 +767,46 @@ export const register: Register = (on, options) => {
       await update($, openAtom, () => p)
     }
 
+    // Docked floor to ceiling: leave a tenth of it clear above the top rule.
+    const gap = e.props.placement === 'dock' ? Math.round((e.props.scroll?.bodyRows ?? 0) / 10) : 0
+    const segment = Math.ceil(e.props.bodyColumns / LOGO.length)
+
     return (
-      <Box flexDirection="column" rowGap={1}>
-        <Box columnGap={2} flexWrap="wrap">
-          {badges(v).map(b => (
-            <Button key={b.panel} plain dimColor={b.panel !== panel} label={b.label} onPress={pick(b.panel)} />
+      <Box flexDirection="column" rowGap={1} marginTop={gap}>
+        <Box>
+          {LOGO.map((l, i) => (
+            <Text key={`rule-${i}`} color={l.color} wrap="truncate-end">
+              {'━'.repeat(Math.max(0, Math.min(segment, e.props.bodyColumns - i * segment)))}
+            </Text>
           ))}
         </Box>
-        <Text bold>{TITLES[panel]}</Text>
+        <Box flexDirection="column" alignItems="center">
+          <Box columnGap={1}>
+            {LOGO.map((l, i) => (
+              <Box key={`logo-${i}`} flexDirection="column" width={5}>
+                {l.rows.map((r, j) => (
+                  <Text key={`logo-${i}-${j}`} color={l.color}>
+                    {r}
+                  </Text>
+                ))}
+              </Box>
+            ))}
+          </Box>
+          <Text color="#c792ea" italic>
+            ✦ pass the baton ✦
+          </Text>
+        </Box>
+        <Box columnGap={2} flexWrap="wrap">
+          {badges(v).map(b => (
+            <Box key={`badge-${b.panel}`}>
+              <Text color={ACCENT[b.panel]}>▌</Text>
+              <Button key={b.panel} plain dimColor={b.panel !== panel} label={b.label} onPress={pick(b.panel)} />
+            </Box>
+          ))}
+        </Box>
+        <Text bold color={ACCENT[panel]}>
+          {TITLES[panel]}
+        </Text>
         <Box flexDirection="column">
           {rowsFor(panel, v).map(r => {
             if (r.isClear) return <Button key={r.key} plain dimColor label={r.text} onPress={() => clearFinished($)} />

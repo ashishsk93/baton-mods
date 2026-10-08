@@ -2,6 +2,12 @@
 
 All notable changes to the baton plugin. Versions match `plugins/baton/.claude-plugin/plugin.json`.
 
+## 1.8.0 — 2026-10-08
+
+### Changed
+- The band moved from above the prompt to the hint line under it, at the left, with a colour marker per badge. The engine's own hint follows it, dim.
+- The side panel leaves a tenth of its height clear at the top, under a gradient rule and a pixel-art BATON banner. Each panel title has its own colour.
+
 ## 1.7.1 — 2026-10-05
 
 ### Fixed

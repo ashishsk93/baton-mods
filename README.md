@@ -92,7 +92,7 @@ sequenceDiagram
 
 ## 📊 The band
 
-A band above the prompt shows where everything stands. Press a badge to expand it. In fullscreen, a side panel shows the details.
+A band on the line under the prompt, at the left, shows where everything stands. Click a badge to expand it. In fullscreen, a side panel shows the details, under a pixel-art BATON banner.
 
 ```
 ◆ web-app-3f   ◎ 3 (1 busy)   ▶ 1 ≡ 2   → 1/4
