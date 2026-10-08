@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { BAND, listAgents, passed, passOne, result, world } from './testkit'
+import { BAND, listAgents, passed, passOne, result, world, openPanel } from './testkit'
 
 const cancel = (id: string, from = 'sender-session') => `BATON-CANCEL ${JSON.stringify({ id, from })}`
 const backlog = async ($: Parameters<typeof passOne>[0]) =>
@@ -94,8 +94,7 @@ test('the sender sees a waiting question and answers it with /baton-answer', asy
   const id = await passOne($)
   await $.session.receive({ origin: { kind: 'peer' }, text: result(id, 'waiting', '\nwhich region?\nReply with …') })
   expect(w.toasts.at(-1)).toBe(`? api-server-7f waiting #${id} · which region?`)
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sent' })
+  const ui = await openPanel($, 'sent')
   expect(await ui.find({ text: new RegExp(`\\? #${id} → api-server-7f\\s+waiting`) })).toBeDefined()
   expect(await ui.find({ text: /\? which region\?/ })).toBeDefined()
 
@@ -116,8 +115,7 @@ test('/pass to several sessions sends one task each and groups them', async ($, 
   expect(ids).toHaveLength(3)
   const [group, first] = ids
 
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sent' })
+  const ui = await openPanel($, 'sent')
   expect(await ui.find({ text: /◇ 0\/2 done  bump lodash/ })).toBeDefined()
   await $.session.receive({ origin: { kind: 'peer' }, text: result(first ?? '', 'done') })
   expect(await ui.find({ text: /◇ 1\/2 done  bump lodash/ })).toBeDefined()
@@ -142,8 +140,7 @@ test('a GitHub PR is followed until it merges', async ($, on) => {
   await $.session.receive({ origin: { kind: 'peer' }, text: result(id, 'done', '\nPR: https://github.com/o/r/pull/42') })
   await w.clock.advance(0)
   expect(w.ghCalls).toEqual(['gh pr view https://github.com/o/r/pull/42 --json state,statusCheckRollup'])
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sent' })
+  const ui = await openPanel($, 'sent')
   expect(await ui.find({ text: /done.*● CI running/ })).toBeDefined()
 
   gh.value = pr('OPEN', [{ status: 'COMPLETED', conclusion: 'FAILURE' }])

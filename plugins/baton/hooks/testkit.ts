@@ -20,6 +20,11 @@ export function world(on: On, dirty = { value: false }, gh: { value?: string | E
   const sid = { value: 'receiver-session' }
   on('session.id', () => ({ value: sid.value }))
   on('ui.status', () => ({ value: undefined }))
+  const opened: string[] = []
+  on('ui.open', (_$, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
   const toasts: string[] = []
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
@@ -46,14 +51,27 @@ export function world(on: On, dirty = { value: false }, gh: { value?: string | E
     submitted.push(e.text)
     return { text: e.text }
   })
-  return { sent, targets, submitted, toasts, clock, ghCalls, sid }
+  return { sent, targets, submitted, toasts, clock, ghCalls, sid, opened }
 }
 
 export const BAND = {
-  component: 'PromptHint',
-  props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
-  viewport: { columns: 104, rows: 40, isFullscreen: false },
+  component: 'SessionMode',
+  props: { modes: [] },
 } as const
+
+export const PANE = {
+  component: 'Pane',
+  requestId: 'baton',
+  props: { title: 'Baton', isFocused: false, bodyColumns: 60, placement: 'dock' },
+} as const
+
+/** Presses a badge under the prompt, as the person does, and mounts the side panel it opens. */
+export async function openPanel($: Engine, key: string, surface: 'terminal' | 'desktop' = 'terminal') {
+  const band = await $.ui.mount({ plugin: 'baton', surface, ...BAND } as never)
+  await band.press({ key })
+  await band.unmount()
+  return $.ui.mount({ plugin: 'baton', surface, ...PANE } as never)
+}
 
 export const PEERS = `This session is web-app-3f [aa11bb] — the name other sessions use to message it.
 

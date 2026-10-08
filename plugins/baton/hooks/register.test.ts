@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { matchTarget, parsePeers } from './shared'
-import { asked, BAND, listAgents, passed, passOne, PEERS, result, world } from './testkit'
+import { asked, BAND, listAgents, passed, passOne, PEERS, PANE, result, world, openPanel } from './testkit'
 
 test('starts a task, backlogs the next, reports done and picks up the backlog', async ($, on) => {
   const w = world(on)
@@ -67,60 +67,37 @@ test('parses this session and its peers from ListAgents, hiding claude-mem obser
   expect(peers.list.map(p => `${p.name}:${p.state}`)).toEqual(['data-dashboards-ca:idle', 'api-server-7f:busy'])
 })
 
-test('the band counts sent tasks, tracks their results and expands on press', async ($, on) => {
+test('the badges count sent tasks, track their results and open the side panel on press', async ($, on) => {
   world(on)
   const handed = await $.command.run({ command: 'pass', args: 'data-dashboards-ca raise cpu to 2048' } as never)
   const id = /#(\w+)/.exec(handed.text ?? '')?.[1]
   await $.session.receive({ origin: { kind: 'peer' }, text: 'BATON-RESULT zz: done. not ours' })
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'baton', surface, ...BAND } as never)
-    expect((await ui.find({ key: 'sent' }))?.text).toContain('→ 1/1')
-    await ui.press({ key: 'sent' })
+    const band = await $.ui.mount({ plugin: 'baton', surface, ...BAND } as never)
+    expect((await band.find({ key: 'sent' }))?.text).toContain('→ 1/1')
+    await band.unmount()
+    const ui = await openPanel($, 'sent', surface)
     expect(await ui.find({ text: /→ data-dashboards-ca\s+sent/ })).toBeDefined()
-    await ui.press({ key: 'sent' })
     await ui.unmount()
   }
 
   await $.session.receive({ origin: { kind: 'peer' }, text: `BATON-RESULT ${id}: done. PR: https://bitbucket.org/x/pull-requests/7` })
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  const ui = await openPanel($, 'sent')
   expect((await ui.find({ key: 'sent' }))?.text).toContain('→ 0/1')
-  await ui.press({ key: 'sent' })
   expect(await ui.find({ text: /✓ #\w+ → data-dashboards-ca\s+done/ })).toBeDefined()
   expect((await ui.find({ type: 'Link' }))?.props).toMatchObject({ href: 'https://bitbucket.org/x/pull-requests/7', label: 'PR #7' })
 })
 
-test('fullscreen: a press opens the docked pane on that tab instead of expanding the band', async ($, on) => {
-  world(on)
-  const opened: string[] = []
-  on('ui.open', (_$, e) => {
-    opened.push(e.id)
-    return { value: { isPlaced: true } }
-  })
+test('a press opens the side panel on that tab, under the banner', async ($, on) => {
+  const w = world(on)
   await $.session.receive({ origin: { kind: 'peer' }, text: passed('f6', 'bump cpu') })
-
-  const band = await $.ui.mount({
-    plugin: 'baton',
-    surface: 'terminal',
-    ...BAND,
-    viewport: { columns: 200, rows: 50, isFullscreen: true },
-  } as never)
-  await band.press({ key: 'tasks' })
-  expect(opened).toEqual(['baton'])
-  expect(await band.find({ text: /#f6 from launchpad/ })).toBeUndefined()
-
-  const pane = await $.ui.mount({
-    plugin: 'baton',
-    surface: 'terminal',
-    component: 'Pane',
-    requestId: 'baton',
-    props: { title: 'Baton', isFocused: false, bodyColumns: 60, placement: 'dock' },
-  } as never)
+  const pane = await openPanel($, 'tasks')
+  expect(w.opened).toEqual(['baton'])
   expect(await pane.find({ text: 'Tasks passed to this session' })).toBeDefined()
   expect(await pane.find({ text: /#f6 from launchpad: bump cpu/ })).toBeDefined()
   expect(await pane.find({ key: 'logo-0' })).toBeDefined()
   expect(await pane.find({ text: /pass the baton/ })).toBeDefined()
-  expect(await band.find({ text: '? for shortcuts' })).toBeDefined()
   await pane.press({ key: 'me' })
   expect(await pane.find({ text: 'This session' })).toBeDefined()
 })
@@ -162,9 +139,8 @@ test('/ask sends a question and shows the answer when it comes back', async ($, 
     origin: { kind: 'peer' },
     text: `BATON-RESULT ${id}: answered. [api] "where is auth configured?"\nIn src/auth/config.ts:12, see https://example.com/doc`,
   })
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  const ui = await openPanel($, 'sent')
   expect((await ui.find({ key: 'sent' }))?.text).toContain('→ 0/1')
-  await ui.press({ key: 'sent' })
   expect(await ui.find({ text: /✓ #\w+ → api-server-7f\s+answered/ })).toBeDefined()
   expect(await ui.find({ text: /↳ In src\/auth\/config\.ts:12/ })).toBeDefined()
   // A URL inside an answer is not taken as a PR link on the question row.
@@ -187,13 +163,13 @@ test('sent rows carry a status icon and an age', async ($, on) => {
   const w = world(on)
   const id = await passOne($)
   await w.clock.advance(12 * 60_000)
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sent' })
+  const ui = await openPanel($, 'sent')
   expect(await ui.find({ text: new RegExp(`○ #${id} → api-server-7f\\s+sent 12m`) })).toBeDefined()
   await $.session.receive({ origin: { kind: 'peer' }, text: result(id, 'done') })
   await w.clock.advance(60 * 60_000)
-  // The panel is still open from the first press: `open` is shared state.
-  const later = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  await ui.unmount()
+  // The side panel is still on the sent tab from the first press: `open` is shared state.
+  const later = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...PANE } as never)
   expect(await later.find({ text: new RegExp(`✓ #${id} → api-server-7f\\s+done 1h`) })).toBeDefined()
 })
 
@@ -205,24 +181,17 @@ test('a passed task with no word for 2h is marked quiet', async ($, on) => {
   expect((await ui.find({ key: 'sent' }))?.text).toBe('→ 1/1')
   await w.clock.advance(2 * 60_000)
   await $.session.receive({ origin: { kind: 'peer' }, text: 'hello' })
-  const later = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
+  const later = await openPanel($, 'sent')
   expect((await later.find({ key: 'sent' }))?.text).toBe('→ 1/1 (1 quiet)')
-  await later.press({ key: 'sent' })
   expect(await later.find({ text: /no word in 2h/ })).toBeDefined()
 })
 
-test('backlog rows in the pane move up, down and drop', async ($, on) => {
+test('backlog rows in the side panel move up, down and drop', async ($, on) => {
   const w = world(on, { value: true })
   for (const id of ['a1', 'b2', 'c3']) await $.session.receive({ origin: { kind: 'peer' }, text: passed(id, `task ${id}`) })
   const order = async () => ((await $.command.run({ command: 'baton', args: '' } as never)).text ?? '').match(/#\w+/g)
   expect(await order()).toEqual(['#a1', '#b2', '#c3'])
-  const pane = await $.ui.mount({
-    plugin: 'baton',
-    surface: 'terminal',
-    component: 'Pane',
-    requestId: 'baton',
-    props: { title: 'Baton', isFocused: false, bodyColumns: 60, placement: 'dock' },
-  } as never)
+  const pane = await openPanel($, 'tasks')
   await pane.press({ key: 'down-a1' })
   expect(await order()).toEqual(['#b2', '#a1', '#c3'])
   await pane.press({ key: 'up-c3' })
@@ -240,16 +209,14 @@ test('a custom hidden_sessions pattern replaces the default', () => {
 test('the hidden_sessions option filters the band', { options: { hidden_sessions: '^(api-|observer-)' } }, async ($, on) => {
   world(on)
   listAgents(on)
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sessions' })
+  const ui = await openPanel($, 'sessions')
   expect((await ui.find({ key: 'sessions' }))?.text).toBe('◎ 1')
 })
 
 test('an invalid hidden_sessions pattern falls back to the default and says so once', { options: { hidden_sessions: '(' } }, async ($, on) => {
   const w = world(on)
   listAgents(on)
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sessions' })
+  const ui = await openPanel($, 'sessions')
   await ui.press({ key: 'sessions' })
   expect((await ui.find({ key: 'sessions' }))?.text).toBe('◎ 3 (1 busy)')
   expect(w.toasts.filter(t => t.includes('hidden_sessions'))).toHaveLength(1)
