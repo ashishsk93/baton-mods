@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { asked, BAND, listAgents, passed, passOne, PEERS, result, world } from './testkit'
+import { asked, BAND, listAgents, passed, passOne, PEERS, result, world, openPanel } from './testkit'
 
 const answers = (on: On, ...replies: string[]) => {
   const questions: string[] = []
@@ -115,8 +115,7 @@ test('a task for a session that is not running is held, then delivered when it a
   expect(questions[0]).toContain("billing isn't running")
   expect(out.text).toContain('Holding #')
   expect(w.sent).toEqual([])
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sent' })
+  const ui = await openPanel($, 'sent')
   expect(await ui.find({ text: /‖ #\w+ → billing\s+held/ })).toBeDefined()
 
   listing.value = peersWith('billing-1a')
@@ -132,8 +131,7 @@ test('held tasks expire after a day; declining the hold sends nothing', async ($
   answers(on, 'Hold', "Don't send")
   await $.command.run({ command: 'pass', args: 'billing fix the invoices' } as never)
   await w.clock.advance(24 * 60 * 60_000 + 60_000)
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sessions' })
+  const ui = await openPanel($, 'sessions')
   expect(w.toasts.some(t => t.includes('expired'))).toBe(true)
   expect((await $.command.run({ command: 'pass', args: 'billing again' } as never)).text).toContain('Not sent')
   expect(tasksSent(w.sent)).toEqual([])
@@ -194,8 +192,7 @@ const pings = (w: { sent: string[]; targets: unknown[] }) => w.targets.filter((_
 test('the sessions panel pings only peers known to run baton, once a minute', async ($, on) => {
   const w = world(on)
   listAgents(on)
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sessions' })
+  const ui = await openPanel($, 'sessions')
   expect(pings(w)).toEqual([])
 
   // A result baton itself sent (it carries the footer) marks api-server-7f as running baton.
@@ -299,8 +296,7 @@ test('clearing finished tasks keeps the one a chain waits on', async ($, on) => 
   await $.command.run({ command: 'pass', args: `infra after #${first} update the client` } as never)
   await $.session.receive({ origin: { kind: 'peer' }, text: result(first, 'done', '\nPR: https://github.com/o/r/pull/5') })
   await w.clock.advance(0)
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sent' })
+  const ui = await openPanel($, 'sent')
   await ui.press({ key: 'clear' })
   expect(await ui.find({ text: new RegExp(`#${first} → api-server-7f`) })).toBeDefined()
   expect(w.toasts.some(t => t.includes('not passed'))).toBe(false)
@@ -317,8 +313,7 @@ test('baton signs what it sends and learns peers from what it receives', async (
   const listing = { value: PEERS }
   on('tool.call', { tool: 'ListAgents' } as never, () => ({ result: { listing: listing.value } }) as never)
   // A session learns its own name from ListAgents, as session.start does.
-  const band = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await band.press({ key: 'sessions' })
+  const band = await openPanel($, 'sessions')
   const task = { id: 'f1', task: 'bump cpu', from: 'sender-session', fromLabel: 'launchpad', fromName: 'launchpad-20' }
   await $.session.receive({ origin: { kind: 'peer' }, text: `BATON-PASS ${JSON.stringify(task)}\n\nTask` })
   expect(w.sent[0]).toMatch(/^BATON-RESULT f1: started/)
@@ -340,8 +335,7 @@ test('an answer keeps the footer out of the answer text', async ($, on) => {
   const out = await $.command.run({ command: 'ask', args: 'api-server-7f where is auth?' } as never)
   const id = /#(\w+)/.exec(out.text ?? '')?.[1]
   await $.session.receive({ origin: { kind: 'peer' }, text: `BATON-RESULT ${id}: answered. [api] "q"\nIn src/auth.ts:12\n— baton · api-server-7f` })
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sent' })
+  const ui = await openPanel($, 'sent')
   expect(await ui.find({ text: /↳ In src\/auth\.ts:12$/ })).toBeDefined()
 })
 
@@ -356,7 +350,6 @@ test('baton messages are found inside the envelope a session delivers them in', 
   const out = await $.command.run({ command: 'ask', args: 'api-server-7f where is auth?' } as never)
   const id = /#(\w+)/.exec(out.text ?? '')?.[1]
   await $.session.receive({ origin: { kind: 'peer' }, text: wrap(`BATON-RESULT ${id}: answered. [api] "q"\nIn src/auth.ts:12\n— baton · api-server-7f`) })
-  const ui = await $.ui.mount({ plugin: 'baton', surface: 'terminal', ...BAND } as never)
-  await ui.press({ key: 'sent' })
+  const ui = await openPanel($, 'sent')
   expect(await ui.find({ text: /↳ In src\/auth\.ts:12$/ })).toBeDefined()
 })

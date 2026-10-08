@@ -8,7 +8,7 @@ import { fromFirstMark, senderOf, withoutFooter } from './protocol'
 import { RESULT_LINE, STATUS_MARK, STATUS_PING, URL } from './protocol'
 import { ACCENT, badges, chainState, FINAL, GITHUB_PR, ICONS, isFollowed, logText, matchTarget } from './shared'
 import { LOGO, parsePeers, parsePick, prState, rowsFor, TITLES } from './shared'
-import type { Row, Target, View } from './shared'
+import type { Target, View } from './shared'
 import { ANSWERER, COMMANDS, STATUSES, TOOLS } from './tools'
 import { clip, configFrom, label, mergeQueues, short } from './config'
 import { ANSWER_WAIT_MS, AUTO_PICK, HOLD_MS, LOG_WINDOWS, PANE, PANE_COLUMNS, PEERS_EVERY_MS, PING_EVERY_MS, PR_EVERY_MS, STALE_MS } from './config'
@@ -717,47 +717,31 @@ export const register: Register = (on, options) => {
     return { text: await pickNext($, cfg) }
   })
 
-  // The line under the prompt, left to right: the badges, then the engine's own hint, dim.
-  on('ui.render', { component: 'PromptHint' }, async ($, e) => {
+  // The right end of the prompt footer: the engine's mode labels, dim, then the badges.
+  // A one-row footer has no room for details: a press opens the side panel on that tab.
+  on('ui.render', { component: 'SessionMode' }, async ($, e) => {
     const v = await snapshot($)
-    const { Box, Button, Link, Text } = $.ui.resolve(e)
-    // Fullscreen docks a pane beside the transcript: details go there, not under the hint.
-    const docks = e.viewport?.isFullscreen === true
-    const width = Math.max(20, (e.viewport?.columns ?? 80) - 4)
+    const { Box, Button, Text } = $.ui.resolve(e)
     const press = (p: Panel) => async () => {
       if (p === 'sessions') void openSessions($, cfg, live)
-      if (!docks) return void (await update($, openAtom, o => (o === p ? null : p)))
       await update($, openAtom, () => p)
       await $.ui.open({ id: PANE, title: 'Baton', columns: PANE_COLUMNS })
     }
-    const draw = (r: Row) =>
-      r.isClear ? (
-        <Button key={r.key} plain dimColor label={r.text} onPress={() => clearFinished($)} />
-      ) : (
-        <Text key={r.key} color={r.color} wrap="truncate-end">
-          {r.link ? `${clip(r.text, width - r.link.label.length - 2)}  ` : clip(r.text, width)}
-          {r.link ? <Link href={r.link.href} label={r.link.label} /> : null}
-        </Text>
-      )
 
     return (
-      <Box flexDirection="column">
-        <Box columnGap={2}>
-          {badges(v).map(b => (
-            <Box key={`badge-${b.panel}`}>
-              <Text color={ACCENT[b.panel]}>▌</Text>
-              <Button key={b.panel} plain dimColor={!!v.open && v.open !== b.panel} label={b.label} onPress={press(b.panel)} />
-            </Box>
-          ))}
-          <Text dimColor wrap="truncate-end">
-            {e.props.tail ? `${e.props.hint} ${e.props.tail}` : e.props.hint}
-          </Text>
-        </Box>
-        {!docks && v.open && <Box flexDirection="column">{rowsFor(v.open, v).map(draw)}</Box>}
+      <Box columnGap={2}>
+        {e.props.modes.length > 0 && <Text dimColor>{e.props.modes.join(' & ')}</Text>}
+        {badges(v).map(b => (
+          <Box key={`badge-${b.panel}`}>
+            <Text color={ACCENT[b.panel]}>▌</Text>
+            <Button key={b.panel} plain dimColor={!!v.open && v.open !== b.panel} label={b.label} onPress={press(b.panel)} />
+          </Box>
+        ))}
       </Box>
     )
   })
 
+  // The side panel: the BATON banner on top, then the tabs and the open tab's rows.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const v = await snapshot($)
     const { Box, Button, Link, Text } = $.ui.resolve(e)
@@ -767,19 +751,8 @@ export const register: Register = (on, options) => {
       await update($, openAtom, () => p)
     }
 
-    // Docked floor to ceiling: leave a tenth of it clear above the top rule.
-    const gap = e.props.placement === 'dock' ? Math.round((e.props.scroll?.bodyRows ?? 0) / 10) : 0
-    const segment = Math.ceil(e.props.bodyColumns / LOGO.length)
-
     return (
-      <Box flexDirection="column" rowGap={1} marginTop={gap}>
-        <Box>
-          {LOGO.map((l, i) => (
-            <Text key={`rule-${i}`} color={l.color} wrap="truncate-end">
-              {'━'.repeat(Math.max(0, Math.min(segment, e.props.bodyColumns - i * segment)))}
-            </Text>
-          ))}
-        </Box>
+      <Box flexDirection="column" rowGap={1}>
         <Box flexDirection="column" alignItems="center">
           <Box columnGap={1}>
             {LOGO.map((l, i) => (

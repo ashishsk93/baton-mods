@@ -122,7 +122,7 @@ export const TITLES: Record<Panel, string> = {
 /** Each panel's colour: its badge marker in the hint line and its title in the pane. */
 export const ACCENT: Record<Panel, string> = { me: '#ff6ec7', sessions: '#5ad1ff', tasks: '#7dff8a', sent: '#ffd166' }
 
-// The pane's banner: one 5x5 block letter per colour, sunset to sea.
+// The side panel's banner: one 5x5 block letter per colour, sunset to sea.
 export const LOGO: { rows: string[]; color: string }[] = [
   { color: '#ff5f87', rows: ['████ ', '█   █', '████ ', '█   █', '████ '] },
   { color: '#ff9f43', rows: [' ███ ', '█   █', '█████', '█   █', '█   █'] },

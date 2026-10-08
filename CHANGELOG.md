@@ -2,6 +2,13 @@
 
 All notable changes to the baton plugin. Versions match `plugins/baton/.claude-plugin/plugin.json`.
 
+## 1.8.1 — 2026-10-08
+
+### Fixed
+- The badges sit at the right end of the footer under the prompt, beside the mode labels. 1.8.0 drew them at the left of the hint line.
+- Pressing a badge always opens the side panel. Outside fullscreen, 1.8.0 tried to expand rows under the one-row hint line, so nothing showed.
+- The side panel opens with the BATON banner on its first row. The gap and gradient rule 1.8.0 drew above it are gone.
+
 ## 1.8.0 — 2026-10-08
 
 ### Changed
