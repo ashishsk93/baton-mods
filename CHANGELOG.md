@@ -2,6 +2,11 @@
 
 All notable changes to the baton plugin. Versions match `plugins/baton/.claude-plugin/plugin.json`.
 
+## 1.9.2 — 2026-10-09
+
+### Fixed
+- The BATON banner keeps its shape in the desktop app. Each pixel is now a filled cell, not a `█` glyph in a proportional font.
+
 ## 1.9.1 — 2026-10-09
 
 ### Fixed

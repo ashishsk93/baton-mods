@@ -267,6 +267,7 @@ test('with AshPack on, the badges leave the footer for a Baton page in the AshPa
     const drawer = await $.ui.mount({ plugin: 'baton', surface, ...PANE, requestId: 'ashpack', props: { ...PANE.props, title: 'AshPack' } } as never)
     expect(await drawer.find({ key: 'ashpack-page:Baton' })).toBeDefined()
     expect(await drawer.find({ key: 'logo-0' })).toBeDefined()
+    expect(await drawer.find({ key: 'logo-0-0-0' })).toBeDefined() // pixels are cells, not glyphs
     await drawer.press({ key: 'tasks' })
     expect(await drawer.find({ text: /#f7 from launchpad: bump memory/ })).toBeDefined()
     await drawer.unmount()
