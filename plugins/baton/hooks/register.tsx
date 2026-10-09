@@ -509,12 +509,15 @@ async function drawPanel($: $, e: RenderInput<'Pane'>, cfg: Config, live: Live) 
     <Box flexDirection="column" rowGap={1}>
       <Box flexDirection="column" alignItems="center">
         <Box columnGap={1}>
+          {/* Each pixel a filled cell, not a █ glyph: the desktop sets text in a proportional font. */}
           {LOGO.map((l, i) => (
             <Box key={`logo-${i}`} flexDirection="column" width={5}>
               {l.rows.map((r, j) => (
-                <Text key={`logo-${i}-${j}`} color={l.color}>
-                  {r}
-                </Text>
+                <Box key={`logo-${i}-${j}`} height={1}>
+                  {[...r].map((c, k) => (
+                    <Box key={`logo-${i}-${j}-${k}`} width={1} height={1} backgroundColor={c === '█' ? l.color : undefined} />
+                  ))}
+                </Box>
               ))}
             </Box>
           ))}
