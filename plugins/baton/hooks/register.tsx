@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import type { Finished, Panel, Queue, Sent, Task } from '../types'
 import { answererPrompt, askPrompt, continuePrompt, routePrompt, taskPrompt, waitingDetail } from './prompts'
@@ -25,7 +25,12 @@ type $ = EngineInterface
  * Per-load state: PR follow-up's timer and whether `gh` is missing, when peers were last
  * pinged, and which answerer subagent owes which question its answer.
  */
-type Live = { isPolling: boolean; isGhMissing: boolean; pingedAt: number; answering: Record<string, Task>; hasAnswerer: boolean }
+type Live = { isPolling: boolean; isGhMissing: boolean; pingedAt: number; answering: Record<string, Task>; hasAnswerer: boolean; hasDrawer: boolean }
+
+// The AshPack drawer: a side pane whose mods each draw a page of their own (a Box keyed
+// `ashpack-page:<Label>`). With AshPack on, baton's badges live on its page, not the footer.
+const DRAWER = 'ashpack'
+const ASHPACK = 'ashpack@ashpack'
 
 
 // Receives can overlap; serialise the store's read-modify-write so no task is lost.
@@ -490,9 +495,75 @@ async function openSessions($: $, cfg: Config, live: Live) {
   await pingPeers($, live)
 }
 
+// The panel: the BATON banner (in its own pane), then the tabs and the open tab's rows.
+async function drawPanel($: $, e: RenderInput<'Pane'>, hasLogo: boolean, cfg: Config, live: Live) {
+  const v = await snapshot($)
+  const { Box, Button, Link, Text } = $.ui.resolve(e)
+  const panel = v.open ?? 'tasks'
+  const pick = (p: Panel) => async () => {
+    if (p === 'sessions') void openSessions($, cfg, live)
+    await update($, openAtom, () => p)
+  }
+
+  return (
+    <Box flexDirection="column" rowGap={1}>
+      {hasLogo && (
+        <Box flexDirection="column" alignItems="center">
+          <Box columnGap={1}>
+            {LOGO.map((l, i) => (
+              <Box key={`logo-${i}`} flexDirection="column" width={5}>
+                {l.rows.map((r, j) => (
+                  <Text key={`logo-${i}-${j}`} color={l.color}>
+                    {r}
+                  </Text>
+                ))}
+              </Box>
+            ))}
+          </Box>
+          <Text color="#c792ea" italic>
+            ✦ pass the baton ✦
+          </Text>
+        </Box>
+      )}
+      <Box columnGap={2} flexWrap="wrap">
+        {badges(v).map(b => (
+          <Box key={`badge-${b.panel}`}>
+            <Text color={ACCENT[b.panel]}>▌</Text>
+            <Button key={b.panel} plain dimColor={b.panel !== panel} label={b.label} onPress={pick(b.panel)} />
+          </Box>
+        ))}
+      </Box>
+      <Text bold color={ACCENT[panel]}>
+        {TITLES[panel]}
+      </Text>
+      <Box flexDirection="column">
+        {rowsFor(panel, v).map(r => {
+          if (r.isClear) return <Button key={r.key} plain dimColor label={r.text} onPress={() => clearFinished($)} />
+          const text = (
+            <Text key={r.key} color={r.color} wrap="wrap">
+              {r.link ? `${r.text}  ` : r.text}
+              {r.link ? <Link href={r.link.href} label={r.link.label} /> : null}
+            </Text>
+          )
+          const id = r.taskId
+          if (!id) return text
+          return (
+            <Box key={r.key} columnGap={1}>
+              {text}
+              <Button key={`up-${id}`} plain dimColor label="↑" onPress={() => moveTask($, id, -1)} />
+              <Button key={`down-${id}`} plain dimColor label="↓" onPress={() => moveTask($, id, 1)} />
+              <Button key={`drop-${id}`} plain dimColor label="✕" onPress={() => dropTask($, id)} />
+            </Box>
+          )
+        })}
+      </Box>
+    </Box>
+  )
+}
+
 export const register: Register = (on, options) => {
   const cfg = configFrom(options)
-  const live: Live = { isPolling: false, isGhMissing: false, pingedAt: -Infinity, answering: {}, hasAnswerer: false }
+  const live: Live = { isPolling: false, isGhMissing: false, pingedAt: -Infinity, answering: {}, hasAnswerer: false, hasDrawer: false }
   const accepts = (t: Task) => !cfg.accept || cfg.accept.test(t.fromLabel)
 
   on('session.start', async ($, e, next) => {
@@ -500,6 +571,10 @@ export const register: Register = (on, options) => {
     live.hasAnswerer = await $.agent.register(ANSWERER).then(
       () => true,
       err => ($.ui.log(`baton: answerer subagent unavailable: ${err}`, { to: 'debug' }), false),
+    )
+    live.hasDrawer = await $.settings.read().then(
+      s => (s.enabledPlugins as Record<string, unknown> | undefined)?.[ASHPACK] === true,
+      () => false,
     )
     await save($, await load($))
     await changeSent($, list => list)
@@ -719,7 +794,9 @@ export const register: Register = (on, options) => {
 
   // The right end of the prompt footer: the engine's mode labels, dim, then the badges.
   // A one-row footer has no room for details: a press opens the side panel on that tab.
-  on('ui.render', { component: 'SessionMode' }, async ($, e) => {
+  // With AshPack on, the footer is the mods' beneath and the badges are on baton's drawer page.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    if (live.hasDrawer) return next(e)
     const v = await snapshot($)
     const { Box, Button, Text } = $.ui.resolve(e)
     const press = (p: Panel) => async () => {
@@ -741,65 +818,18 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // The side panel: the BATON banner on top, then the tabs and the open tab's rows.
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const v = await snapshot($)
-    const { Box, Button, Link, Text } = $.ui.resolve(e)
-    const panel = v.open ?? 'tasks'
-    const pick = (p: Panel) => async () => {
-      if (p === 'sessions') void openSessions($, cfg, live)
-      await update($, openAtom, () => p)
-    }
+  // The side panel of its own.
+  on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => drawPanel($, e, true, cfg, live))
 
+  // baton's page in the AshPack drawer, after the pages of the mods beneath; the drawer has its own header.
+  on('ui.render', { component: 'Pane', requestId: DRAWER }, async ($, e, next) => {
+    const below = await next(e)
+    const { Box } = $.ui.resolve(e)
     return (
-      <Box flexDirection="column" rowGap={1}>
-        <Box flexDirection="column" alignItems="center">
-          <Box columnGap={1}>
-            {LOGO.map((l, i) => (
-              <Box key={`logo-${i}`} flexDirection="column" width={5}>
-                {l.rows.map((r, j) => (
-                  <Text key={`logo-${i}-${j}`} color={l.color}>
-                    {r}
-                  </Text>
-                ))}
-              </Box>
-            ))}
-          </Box>
-          <Text color="#c792ea" italic>
-            ✦ pass the baton ✦
-          </Text>
-        </Box>
-        <Box columnGap={2} flexWrap="wrap">
-          {badges(v).map(b => (
-            <Box key={`badge-${b.panel}`}>
-              <Text color={ACCENT[b.panel]}>▌</Text>
-              <Button key={b.panel} plain dimColor={b.panel !== panel} label={b.label} onPress={pick(b.panel)} />
-            </Box>
-          ))}
-        </Box>
-        <Text bold color={ACCENT[panel]}>
-          {TITLES[panel]}
-        </Text>
-        <Box flexDirection="column">
-          {rowsFor(panel, v).map(r => {
-            if (r.isClear) return <Button key={r.key} plain dimColor label={r.text} onPress={() => clearFinished($)} />
-            const text = (
-              <Text key={r.key} color={r.color} wrap="wrap">
-                {r.link ? `${r.text}  ` : r.text}
-                {r.link ? <Link href={r.link.href} label={r.link.label} /> : null}
-              </Text>
-            )
-            const id = r.taskId
-            if (!id) return text
-            return (
-              <Box key={r.key} columnGap={1}>
-                {text}
-                <Button key={`up-${id}`} plain dimColor label="↑" onPress={() => moveTask($, id, -1)} />
-                <Button key={`down-${id}`} plain dimColor label="↓" onPress={() => moveTask($, id, 1)} />
-                <Button key={`drop-${id}`} plain dimColor label="✕" onPress={() => dropTask($, id)} />
-              </Box>
-            )
-          })}
+      <Box flexDirection="column">
+        {below}
+        <Box key="ashpack-page:Baton" flexDirection="column">
+          {await drawPanel($, e, false, cfg, live)}
         </Box>
       </Box>
     )

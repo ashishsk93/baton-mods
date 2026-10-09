@@ -2,6 +2,11 @@
 
 All notable changes to the baton plugin. Versions match `plugins/baton/.claude-plugin/plugin.json`.
 
+## 1.9.0 — 2026-10-09
+
+### Added
+- A **Baton** page in the AshPack drawer: the badges, the open tab's title and its rows. With AshPack on, the badges leave the footer, and baton passes the footer on to the mods after it.
+
 ## 1.8.1 — 2026-10-08
 
 ### Fixed
