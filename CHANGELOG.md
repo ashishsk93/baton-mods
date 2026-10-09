@@ -2,6 +2,11 @@
 
 All notable changes to the baton plugin. Versions match `plugins/baton/.claude-plugin/plugin.json`.
 
+## 1.9.1 — 2026-10-09
+
+### Fixed
+- The Baton page in the AshPack drawer opens with the BATON banner, as baton's own side panel does.
+
 ## 1.9.0 — 2026-10-09
 
 ### Added
