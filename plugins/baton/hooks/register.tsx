@@ -495,8 +495,8 @@ async function openSessions($: $, cfg: Config, live: Live) {
   await pingPeers($, live)
 }
 
-// The panel: the BATON banner (in its own pane), then the tabs and the open tab's rows.
-async function drawPanel($: $, e: RenderInput<'Pane'>, hasLogo: boolean, cfg: Config, live: Live) {
+// The panel: the BATON banner, then the tabs and the open tab's rows.
+async function drawPanel($: $, e: RenderInput<'Pane'>, cfg: Config, live: Live) {
   const v = await snapshot($)
   const { Box, Button, Link, Text } = $.ui.resolve(e)
   const panel = v.open ?? 'tasks'
@@ -507,24 +507,22 @@ async function drawPanel($: $, e: RenderInput<'Pane'>, hasLogo: boolean, cfg: Co
 
   return (
     <Box flexDirection="column" rowGap={1}>
-      {hasLogo && (
-        <Box flexDirection="column" alignItems="center">
-          <Box columnGap={1}>
-            {LOGO.map((l, i) => (
-              <Box key={`logo-${i}`} flexDirection="column" width={5}>
-                {l.rows.map((r, j) => (
-                  <Text key={`logo-${i}-${j}`} color={l.color}>
-                    {r}
-                  </Text>
-                ))}
-              </Box>
-            ))}
-          </Box>
-          <Text color="#c792ea" italic>
-            ✦ pass the baton ✦
-          </Text>
+      <Box flexDirection="column" alignItems="center">
+        <Box columnGap={1}>
+          {LOGO.map((l, i) => (
+            <Box key={`logo-${i}`} flexDirection="column" width={5}>
+              {l.rows.map((r, j) => (
+                <Text key={`logo-${i}-${j}`} color={l.color}>
+                  {r}
+                </Text>
+              ))}
+            </Box>
+          ))}
         </Box>
-      )}
+        <Text color="#c792ea" italic>
+          ✦ pass the baton ✦
+        </Text>
+      </Box>
       <Box columnGap={2} flexWrap="wrap">
         {badges(v).map(b => (
           <Box key={`badge-${b.panel}`}>
@@ -819,9 +817,9 @@ export const register: Register = (on, options) => {
   })
 
   // The side panel of its own.
-  on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => drawPanel($, e, true, cfg, live))
+  on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => drawPanel($, e, cfg, live))
 
-  // baton's page in the AshPack drawer, after the pages of the mods beneath; the drawer has its own header.
+  // baton's page in the AshPack drawer, after the pages of the mods beneath, banner and all.
   on('ui.render', { component: 'Pane', requestId: DRAWER }, async ($, e, next) => {
     const below = await next(e)
     const { Box } = $.ui.resolve(e)
@@ -829,7 +827,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         {below}
         <Box key="ashpack-page:Baton" flexDirection="column">
-          {await drawPanel($, e, false, cfg, live)}
+          {await drawPanel($, e, cfg, live)}
         </Box>
       </Box>
     )

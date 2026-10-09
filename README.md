@@ -94,7 +94,7 @@ sequenceDiagram
 
 Badges at the right end of the footer under the prompt show where everything stands. Click one to open the baton side panel on that tab, under a pixel-art BATON banner. In fullscreen it docks beside the transcript.
 
-With [AshPack](https://github.com/ashishsk93/ashpack) on, the badges leave the footer: baton is a **Baton** page in the AshPack drawer (click `◆ AshPack` in the footer), with the same badges and rows.
+With [AshPack](https://github.com/ashishsk93/ashpack) on, the badges leave the footer: baton is a **Baton** page in the AshPack drawer (click `◆ AshPack` in the footer), with the same banner, badges and rows.
 
 ```
 ◆ web-app-3f   ◎ 3 (1 busy)   ▶ 1 ≡ 2   → 1/4
