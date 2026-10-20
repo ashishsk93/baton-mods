@@ -793,12 +793,14 @@ export const register: Register = (on, options) => {
     return { text: await pickNext($, cfg) }
   })
 
-  // The right end of the prompt footer: the engine's mode labels, dim, then the badges.
+  // The right end of the prompt footer: what lies beneath (the engine's mode labels, the drawings
+  // of the mods after baton), then the badges.
   // A one-row footer has no room for details: a press opens the side panel on that tab.
   // With AshPack on, the footer is the mods' beneath and the badges are on baton's drawer page.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     if (live.hasDrawer) return next(e)
     const v = await snapshot($)
+    const beneath = await next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const press = (p: Panel) => async () => {
       if (p === 'sessions') void openSessions($, cfg, live)
@@ -808,7 +810,7 @@ export const register: Register = (on, options) => {
 
     return (
       <Box columnGap={2}>
-        {e.props.modes.length > 0 && <Text dimColor>{e.props.modes.join(' & ')}</Text>}
+        {beneath}
         {badges(v).map(b => (
           <Box key={`badge-${b.panel}`}>
             <Text color={ACCENT[b.panel]}>▌</Text>
