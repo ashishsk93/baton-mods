@@ -245,6 +245,20 @@ test('/pass and /ask check the name against ListAgents before sending', async ($
   expect(w.targets).toEqual(['infra-a9', 'api-server-7f'])
 })
 
+test('the footer keeps what lies beneath, the mode labels and the mods after baton, before the badges', async ($, on) => {
+  const w = world(on)
+  // Stand in for what lies beneath baton: another mod's switch, drawn after the engine's mode labels.
+  w.beneath.value = { type: 'Text', props: {}, children: ['other-mod-switch'] }
+  await $.session.receive({ origin: { kind: 'peer' }, text: passed('f8', 'bump memory') })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const band = await $.ui.mount({ plugin: 'baton', surface, ...BAND, props: { modes: ['auto mode on'] } } as never)
+    expect(await band.find({ text: /other-mod-switch/ })).toBeDefined()
+    expect(await band.find({ key: 'tasks' })).toBeDefined()
+    await band.unmount()
+  }
+})
+
 test('with AshPack on, the badges leave the footer for a Baton page in the AshPack drawer', async ($, on) => {
   const w = world(on)
   on('command.register', () => ({ value: undefined }) as never)
@@ -252,7 +266,7 @@ test('with AshPack on, the badges leave the footer for a Baton page in the AshPa
   on('agent.register', () => ({ value: { agent: 'baton:answerer' } }) as never)
   on('settings.read', () => ({ value: { enabledPlugins: { 'ashpack@ashpack': true } } }) as never)
   // Stand in for what lies beneath baton: the engine's footer, and the drawer's other pages.
-  on('ui.render', { component: 'SessionMode' }, () => ({ type: 'Text', props: {}, children: ['engine-modes'] }) as never)
+  w.beneath.value = { type: 'Text', props: {}, children: ['engine-modes'] }
   on('ui.render', { component: 'Pane', requestId: 'ashpack' }, () => ({ type: 'Box', props: {}, children: [] }) as never)
   on('session.start', (_$, e) => e as never)
   await $.session.start({ source: 'startup', cwd: '/repos/data_dashboards_db' } as never)

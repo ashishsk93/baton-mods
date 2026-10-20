@@ -2,6 +2,11 @@
 
 All notable changes to the baton plugin. Versions match `plugins/baton/.claude-plugin/plugin.json`.
 
+## Unreleased
+
+### Fixed
+- The footer keeps what other mods draw there. Baton drew the mode labels itself and did not pass the footer on, so the mods after it (Narrator's switch, Sub Meter) did not show. The engine now draws the mode labels, in its own style, and the badges follow.
+
 ## 1.9.2 — 2026-10-09
 
 ### Fixed
