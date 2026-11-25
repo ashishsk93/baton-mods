@@ -7,6 +7,11 @@ All notable changes to the baton plugin. Versions match `plugins/baton/.claude-p
 ### Fixed
 - The footer keeps what other mods draw there. Baton drew the mode labels itself and did not pass the footer on, so the mods after it (Narrator's switch, Sub Meter) did not show. The engine now draws the mode labels, in its own style, and the badges follow.
 
+## 1.9.3 — 2026-11-25
+
+### Fixed
+- The Baton page shows in the AshPack drawer again on Claude Code 2.1.332. That build lets a pane hook hear only its own plugin's panes unless it names `plugin`, and the drawer is AshPack's.
+
 ## 1.9.2 — 2026-10-09
 
 ### Fixed

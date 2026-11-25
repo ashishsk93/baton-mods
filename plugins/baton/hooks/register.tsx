@@ -825,7 +825,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => drawPanel($, e, cfg, live))
 
   // baton's page in the AshPack drawer, after the pages of the mods beneath, banner and all.
-  on('ui.render', { component: 'Pane', requestId: DRAWER }, async ($, e, next) => {
+  // The drawer is AshPack's pane: `plugin: '*'`, as a hook naming no plugin hears its own panes alone.
+  on('ui.render', { component: 'Pane', requestId: DRAWER, plugin: '*' }, async ($, e, next) => {
     const below = await next(e)
     const { Box } = $.ui.resolve(e)
     return (
