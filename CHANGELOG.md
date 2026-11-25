@@ -2,6 +2,11 @@
 
 All notable changes to the baton plugin. Versions match `plugins/baton/.claude-plugin/plugin.json`.
 
+## 1.9.3 — 2026-11-25
+
+### Fixed
+- The Baton page shows in the AshPack drawer again on Claude Code 2.1.332. That build lets a pane hook hear only its own plugin's panes unless it names `plugin`, and the drawer is AshPack's.
+
 ## 1.9.2 — 2026-10-09
 
 ### Fixed
