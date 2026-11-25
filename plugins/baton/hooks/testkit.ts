@@ -51,7 +51,11 @@ export function world(on: On, dirty = { value: false }, gh: { value?: string | E
     submitted.push(e.text)
     return { text: e.text }
   })
-  return { sent, targets, submitted, toasts, clock, ghCalls, sid, opened }
+  // What lies beneath the footer's badges: the engine's own node, which draws the mode labels, or
+  // what a test sets in its place (another mod's drawing).
+  const beneath: { value: unknown } = { value: { type: 'engine', ref: 0 } }
+  on('ui.render', { component: 'SessionMode' }, () => beneath.value as never)
+  return { beneath, sent, targets, submitted, toasts, clock, ghCalls, sid, opened }
 }
 
 export const BAND = {
